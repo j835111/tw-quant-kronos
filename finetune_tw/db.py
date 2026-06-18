@@ -38,9 +38,15 @@ def upsert_prices(db_path: str, symbol: str, df: pd.DataFrame) -> int:
         conn.executemany(
             "INSERT OR REPLACE INTO daily_prices VALUES (?,?,?,?,?,?,?,?)", rows
         )
+        # Create stock record only if it doesn't exist (preserves first_date)
         conn.execute(
-            "INSERT OR REPLACE INTO stocks (symbol, first_date, last_date) VALUES (?,?,?)",
+            "INSERT OR IGNORE INTO stocks (symbol, first_date, last_date) VALUES (?,?,?)",
             (symbol, df["date"].min(), df["date"].max()),
+        )
+        # Always update last_date to the latest date seen
+        conn.execute(
+            "UPDATE stocks SET last_date = ? WHERE symbol = ? AND last_date < ?",
+            (df["date"].max(), symbol, df["date"].max()),
         )
     return len(rows)
 

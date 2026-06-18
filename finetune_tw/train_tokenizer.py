@@ -57,8 +57,8 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         for batch_x, _ in train_loader:
             batch_x = batch_x.to(device, non_blocking=True)
             with autocast():
-                zs, bsq_loss, z_pre, _ = tokenizer(batch_x)
-                recon_loss = F.mse_loss(zs, batch_x) + F.mse_loss(z_pre, batch_x)
+                (z_pre, z), bsq_loss, _, _ = tokenizer(batch_x)
+                recon_loss = F.mse_loss(z_pre, batch_x) + F.mse_loss(z, batch_x)
                 loss = (recon_loss + bsq_loss) / 2
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -95,8 +95,8 @@ def _validate(tokenizer: KronosTokenizer, loader: DataLoader, device: torch.devi
         for batch_x, _ in loader:
             batch_x = batch_x.to(device)
             with autocast():
-                zs, _, _, _ = tokenizer(batch_x)
-                total += F.mse_loss(zs, batch_x).item() * batch_x.size(0)
+                (_, z), _, _, _ = tokenizer(batch_x)
+                total += F.mse_loss(z, batch_x).item() * batch_x.size(0)
             count += batch_x.size(0)
     return total / count if count else 0.0
 
