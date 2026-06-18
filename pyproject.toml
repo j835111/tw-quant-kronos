@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "finetune_tw"
+version = "0.1.0"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["finetune_tw*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

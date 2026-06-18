@@ -1,0 +1,32 @@
+# Reference config for TWSE daily fine-tuning
+db_path: "finetune_tw/data/tw_stocks.db"
+lookback_window: 90
+predict_window: 10
+max_context: 512
+clip: 5.0
+train_end_date: "2023-12-31"
+val_end_date: "2024-06-30"
+
+tokenizer_epochs: 30
+basemodel_epochs: 20
+batch_size: 16
+save_steps: 500
+log_interval: 50
+tokenizer_lr: 0.0002
+predictor_lr: 0.00004
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_weight_decay: 0.1
+num_workers: 2
+seed: 42
+
+pretrained_tokenizer: "NeoQuasar/Kronos-Tokenizer-base"
+pretrained_predictor: "NeoQuasar/Kronos-base"
+exp_name: "tw_daily"
+output_dir: "finetune_tw/outputs"
+
+top_k: 20
+hold_days: 5
+pred_len: 10
+test_start_date: "2024-07-01"
+benchmark_symbol: "^TWII"
