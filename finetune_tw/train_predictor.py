@@ -25,7 +25,7 @@ def _gdrive_sync(local_dir: Path, remote: str = "gdrive:Kronos/outputs") -> None
     rel = local_dir.name
     r = subprocess.run(
         ["rclone", "sync", str(local_dir), f"{remote}/{rel}", "--transfers=4"],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=600,
     )
     if r.returncode == 0:
         print(f"  [gdrive] synced → {remote}/{rel}")
@@ -48,12 +48,12 @@ def _gdrive_restore_checkpoints(ckpt_dir: Path, remote: str) -> None:
 
 
 def _gdrive_sync_checkpoint(ckpt_path: Path, remote_ckpt_dir: str) -> None:
-    """每次存 checkpoint 後，立即上傳該檔到 Drive。"""
+    """每次存 checkpoint 後，背景上傳到 Drive（不阻塞訓練）。"""
     if shutil.which("rclone") is None:
         return
-    subprocess.run(
+    subprocess.Popen(
         ["rclone", "copy", str(ckpt_path), remote_ckpt_dir, "--transfers=4"],
-        capture_output=True, text=True, timeout=120,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
 
 
