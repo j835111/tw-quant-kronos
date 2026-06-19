@@ -4,6 +4,8 @@ Requires: tokenizer best_model saved by train_tokenizer.py
 """
 from __future__ import annotations
 import argparse
+import shutil
+import subprocess
 from pathlib import Path
 
 import torch
@@ -14,6 +16,45 @@ from model import Kronos, KronosTokenizer
 from finetune_tw.config import Config
 from finetune_tw.dataset import MultiStockDataset
 from finetune_tw.train_tokenizer import _load_latest_checkpoint, _save_checkpoint
+
+
+def _gdrive_sync(local_dir: Path, remote: str = "gdrive:Kronos/outputs") -> None:
+    """Sync local_dir to Google Drive. Silently skips if rclone not found."""
+    if shutil.which("rclone") is None:
+        return
+    rel = local_dir.name
+    r = subprocess.run(
+        ["rclone", "sync", str(local_dir), f"{remote}/{rel}", "--transfers=4"],
+        capture_output=True, text=True, timeout=120,
+    )
+    if r.returncode == 0:
+        print(f"  [gdrive] synced → {remote}/{rel}")
+    else:
+        print(f"  [gdrive] sync failed: {r.stderr[:200]}")
+
+
+def _gdrive_restore_checkpoints(ckpt_dir: Path, remote: str) -> None:
+    """啟動時，若本地無 ckpt，從 Drive 拉回。"""
+    if shutil.which("rclone") is None or list(ckpt_dir.glob("ckpt-*.pt")):
+        return
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(
+        ["rclone", "copy", remote, str(ckpt_dir), "--transfers=4"],
+        capture_output=True, text=True, timeout=300,
+    )
+    n = len(list(ckpt_dir.glob("ckpt-*.pt")))
+    if n:
+        print(f"  [gdrive] restored {n} checkpoint(s) from {remote}")
+
+
+def _gdrive_sync_checkpoint(ckpt_path: Path, remote_ckpt_dir: str) -> None:
+    """每次存 checkpoint 後，立即上傳該檔到 Drive。"""
+    if shutil.which("rclone") is None:
+        return
+    subprocess.run(
+        ["rclone", "copy", str(ckpt_path), remote_ckpt_dir, "--transfers=4"],
+        capture_output=True, text=True, timeout=120,
+    )
 
 
 def _resolve_amp(amp_dtype: str) -> tuple[bool, "torch.dtype | None"]:
@@ -45,6 +86,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
 
     save_dir = Path(cfg.output_dir) / cfg.exp_name / "predictor"
     ckpt_dir = save_dir / "checkpoints"
+    remote_root = f"gdrive:Kronos/outputs/{cfg.exp_name}/predictor"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     train_ds = MultiStockDataset(cfg.db_path, cfg.lookback_window, cfg.predict_window,
@@ -65,6 +107,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         steps_per_epoch=len(train_loader), epochs=cfg.basemodel_epochs,
         pct_start=0.03, div_factor=10,
     )
+    _gdrive_restore_checkpoints(ckpt_dir, f"{remote_root}/checkpoints")
     start_epoch, global_step = _load_latest_checkpoint(ckpt_dir, model, optimizer, scheduler)
     best_val_loss = float("inf")
     log_path = save_dir / "train_log.csv"
@@ -106,6 +149,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
 
             if global_step % cfg.save_steps == 0:
                 _save_checkpoint(ckpt_dir, global_step, epoch, model, optimizer, scheduler)
+                _gdrive_sync_checkpoint(ckpt_dir / f"ckpt-{global_step}.pt", f"{remote_root}/checkpoints")
 
             if max_steps > 0 and global_step >= max_steps:
                 return
@@ -118,6 +162,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
             best_val_loss = val_loss
             model.save_pretrained(str(save_dir / "best_model"))
             print(f"  -> new best val_loss={val_loss:.4f}, saved.")
+            _gdrive_sync(save_dir / "best_model", remote=remote_root)
 
 
 def _validate_predictor(model, tokenizer, loader, device, amp_enabled=False, amp_dtype=None) -> float:

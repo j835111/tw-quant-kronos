@@ -3,16 +3,56 @@ python finetune_tw/train_tokenizer.py --config finetune_tw/configs/config_tw_dai
 """
 from __future__ import annotations
 import argparse
+import shutil
+import subprocess
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
 from model import KronosTokenizer
 from finetune_tw.config import Config
 from finetune_tw.dataset import MultiStockDataset
+
+
+def _gdrive_sync(local_dir: Path, remote: str = "gdrive:Kronos/outputs") -> None:
+    """Sync local_dir to Google Drive. Silently skips if rclone not found."""
+    if shutil.which("rclone") is None:
+        return
+    rel = local_dir.name
+    r = subprocess.run(
+        ["rclone", "sync", str(local_dir), f"{remote}/{rel}", "--transfers=4"],
+        capture_output=True, text=True, timeout=120,
+    )
+    if r.returncode == 0:
+        print(f"  [gdrive] synced → {remote}/{rel}")
+    else:
+        print(f"  [gdrive] sync failed: {r.stderr[:200]}")
+
+
+def _gdrive_restore_checkpoints(ckpt_dir: Path, remote: str) -> None:
+    """啟動時，若本地無 ckpt，從 Drive 拉回。"""
+    if shutil.which("rclone") is None or list(ckpt_dir.glob("ckpt-*.pt")):
+        return
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(
+        ["rclone", "copy", remote, str(ckpt_dir), "--transfers=4"],
+        capture_output=True, text=True, timeout=300,
+    )
+    n = len(list(ckpt_dir.glob("ckpt-*.pt")))
+    if n:
+        print(f"  [gdrive] restored {n} checkpoint(s) from {remote}")
+
+
+def _gdrive_sync_checkpoint(ckpt_path: Path, remote_ckpt_dir: str) -> None:
+    """每次存 checkpoint 後，立即上傳該檔到 Drive。"""
+    if shutil.which("rclone") is None:
+        return
+    subprocess.run(
+        ["rclone", "copy", str(ckpt_path), remote_ckpt_dir, "--transfers=4"],
+        capture_output=True, text=True, timeout=120,
+    )
 
 
 def run_training(cfg: Config, max_steps: int = -1) -> None:
@@ -21,6 +61,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
 
     save_dir = Path(cfg.output_dir) / cfg.exp_name / "tokenizer"
     ckpt_dir = save_dir / "checkpoints"
+    remote_root = f"gdrive:Kronos/outputs/{cfg.exp_name}/tokenizer"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     tokenizer = KronosTokenizer.from_pretrained(cfg.pretrained_tokenizer).to(device)
@@ -43,10 +84,9 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         steps_per_epoch=len(train_loader), epochs=cfg.tokenizer_epochs,
         pct_start=0.03, div_factor=10,
     )
-    scaler = GradScaler()
-
     # Resume from latest checkpoint
-    start_epoch, global_step = _load_latest_checkpoint(ckpt_dir, tokenizer, optimizer, scheduler, scaler)
+    _gdrive_restore_checkpoints(ckpt_dir, f"{remote_root}/checkpoints")
+    start_epoch, global_step = _load_latest_checkpoint(ckpt_dir, tokenizer, optimizer, scheduler)
     best_val_loss = float("inf")
     log_path = save_dir / "train_log.csv"
     if not log_path.exists():
@@ -56,16 +96,13 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         tokenizer.train()
         for batch_x, _ in train_loader:
             batch_x = batch_x.to(device, non_blocking=True)
-            with autocast():
-                (z_pre, z), bsq_loss, _, _ = tokenizer(batch_x)
-                recon_loss = F.mse_loss(z_pre, batch_x) + F.mse_loss(z, batch_x)
-                loss = (recon_loss + bsq_loss) / 2
+            (z_pre, z), bsq_loss, _, _ = tokenizer(batch_x)
+            recon_loss = F.mse_loss(z_pre, batch_x) + F.mse_loss(z, batch_x)
+            loss = (recon_loss + bsq_loss) / 2
             optimizer.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(tokenizer.parameters(), 3.0)
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
             scheduler.step()
             global_step += 1
 
@@ -73,7 +110,8 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
                 print(f"[epoch {epoch+1} step {global_step}] loss={loss.item():.4f}")
 
             if global_step % cfg.save_steps == 0:
-                _save_checkpoint(ckpt_dir, global_step, epoch, tokenizer, optimizer, scheduler, scaler)
+                _save_checkpoint(ckpt_dir, global_step, epoch, tokenizer, optimizer, scheduler)
+                _gdrive_sync_checkpoint(ckpt_dir / f"ckpt-{global_step}.pt", f"{remote_root}/checkpoints")
 
             if max_steps > 0 and global_step >= max_steps:
                 return
@@ -86,6 +124,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
             best_val_loss = val_loss
             tokenizer.save_pretrained(str(save_dir / "best_model"))
             print(f"  -> new best val_loss={val_loss:.4f}, saved.")
+            _gdrive_sync(save_dir / "best_model", remote=remote_root)
 
 
 def _validate(tokenizer: KronosTokenizer, loader: DataLoader, device: torch.device) -> float:
@@ -94,25 +133,23 @@ def _validate(tokenizer: KronosTokenizer, loader: DataLoader, device: torch.devi
     with torch.no_grad():
         for batch_x, _ in loader:
             batch_x = batch_x.to(device)
-            with autocast():
-                (_, z), _, _, _ = tokenizer(batch_x)
-                total += F.mse_loss(z, batch_x).item() * batch_x.size(0)
+            (_, z), _, _, _ = tokenizer(batch_x)
+            total += F.mse_loss(z, batch_x).item() * batch_x.size(0)
             count += batch_x.size(0)
     return total / count if count else 0.0
 
 
-def _save_checkpoint(ckpt_dir: Path, step: int, epoch: int, model, optimizer, scheduler, scaler) -> None:
+def _save_checkpoint(ckpt_dir: Path, step: int, epoch: int, model, optimizer, scheduler) -> None:
     torch.save({
         "step": step,
         "epoch": epoch,
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
-        "scaler": scaler.state_dict(),
     }, ckpt_dir / f"ckpt-{step}.pt")
 
 
-def _load_latest_checkpoint(ckpt_dir: Path, model, optimizer, scheduler, scaler):
+def _load_latest_checkpoint(ckpt_dir: Path, model, optimizer, scheduler):
     ckpts = sorted(ckpt_dir.glob("ckpt-*.pt"),
                    key=lambda p: int(p.stem.split("-")[1]))
     if not ckpts:
@@ -121,7 +158,6 @@ def _load_latest_checkpoint(ckpt_dir: Path, model, optimizer, scheduler, scaler)
     model.load_state_dict(state["model"])
     optimizer.load_state_dict(state["optimizer"])
     scheduler.load_state_dict(state["scheduler"])
-    scaler.load_state_dict(state["scaler"])
     print(f"Resumed from {ckpts[-1].name} (step {state['step']})")
     return state.get("epoch", 0), state["step"]
 
