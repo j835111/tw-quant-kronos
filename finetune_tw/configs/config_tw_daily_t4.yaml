@@ -1,4 +1,4 @@
-# Colab T4 (16 GB VRAM) — conservative batch size for bf16
+# Colab T4 (16 GB VRAM) — fp16 + GradScaler (Turing has native fp16 TensorCores, not bf16)
 # Usage: python -m finetune_tw.train_tokenizer --config finetune_tw/configs/config_tw_daily_t4.yaml
 db_path: "finetune_tw/data/tw_stocks.db"
 lookback_window: 90
@@ -19,7 +19,7 @@ adam_beta1: 0.9
 adam_beta2: 0.95
 adam_weight_decay: 0.1
 num_workers: 2
-amp_dtype: "none"  # T4 無原生 bf16；fp16+GradScaler 支援待後續加入
+amp_dtype: "fp16"  # T4 Turing：原生 fp16 TensorCore，GradScaler 自動啟用
 seed: 42
 
 pretrained_tokenizer: "NeoQuasar/Kronos-Tokenizer-base"

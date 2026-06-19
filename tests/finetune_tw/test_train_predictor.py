@@ -15,7 +15,13 @@ def test_resolve_amp_none():
     assert dtype is None
 
 
+def test_resolve_amp_fp16():
+    enabled, dtype = _resolve_amp("fp16")
+    assert enabled is True
+    assert dtype == torch.float16
+
+
 def test_resolve_amp_unknown_falls_back_to_disabled():
-    enabled, dtype = _resolve_amp("fp16")  # This plan does not support fp16; treat as disabled.
+    enabled, dtype = _resolve_amp("tf32")
     assert enabled is False
     assert dtype is None

@@ -7,6 +7,7 @@ import argparse
 from pathlib import Path
 
 import torch
+from torch.cuda.amp import GradScaler
 from torch.utils.data import DataLoader
 
 from model import Kronos, KronosTokenizer
@@ -16,9 +17,11 @@ from finetune_tw.train_tokenizer import _load_latest_checkpoint, _save_checkpoin
 
 
 def _resolve_amp(amp_dtype: str) -> tuple[bool, "torch.dtype | None"]:
-    """Map config amp_dtype to (autocast_enabled, dtype). Only bf16 is supported."""
+    """Map config amp_dtype to (autocast_enabled, dtype). Supports bf16 and fp16."""
     if amp_dtype == "bf16":
         return True, torch.bfloat16
+    if amp_dtype == "fp16":
+        return True, torch.float16
     return False, None
 
 
@@ -38,6 +41,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
     model = Kronos.from_pretrained(cfg.pretrained_predictor).to(device)
     amp_enabled, amp_dtype = _resolve_amp(cfg.amp_dtype)
     amp_enabled = amp_enabled and device.type == "cuda"
+    scaler = GradScaler() if (amp_enabled and amp_dtype == torch.float16) else None
 
     save_dir = Path(cfg.output_dir) / cfg.exp_name / "predictor"
     ckpt_dir = save_dir / "checkpoints"
@@ -84,9 +88,16 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
                 loss, _, _ = model.head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
 
             optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
-            optimizer.step()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
+                optimizer.step()
             scheduler.step()
             global_step += 1
 
