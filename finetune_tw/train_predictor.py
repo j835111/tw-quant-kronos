@@ -19,18 +19,15 @@ from finetune_tw.train_tokenizer import _load_latest_checkpoint, _save_checkpoin
 
 
 def _gdrive_sync(local_dir: Path, remote: str = "gdrive:Kronos/outputs") -> None:
-    """Sync local_dir to Google Drive. Silently skips if rclone not found."""
+    """Sync local_dir to Google Drive in background. Silently skips if rclone not found."""
     if shutil.which("rclone") is None:
         return
     rel = local_dir.name
-    r = subprocess.run(
+    subprocess.Popen(
         ["rclone", "sync", str(local_dir), f"{remote}/{rel}", "--transfers=4"],
-        capture_output=True, text=True, timeout=600,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    if r.returncode == 0:
-        print(f"  [gdrive] synced → {remote}/{rel}")
-    else:
-        print(f"  [gdrive] sync failed: {r.stderr[:200]}")
+    print(f"  [gdrive] sync started (background) → {remote}/{rel}")
 
 
 def _gdrive_restore_checkpoints(ckpt_dir: Path, remote: str) -> None:
