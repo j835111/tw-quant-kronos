@@ -1,15 +1,30 @@
 from __future__ import annotations
+import re
 import requests
 import pandas as pd
 import yfinance as yf
 
 TWSE_LISTING_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_AVG_ALL"
 
+# 4-digit ETF codes worth including alongside common stocks
+_CORE_ETFS = {"0050", "0051", "0052", "0053", "0055", "0056", "0057", "0061"}
+
 
 def get_twse_symbol_list() -> list[str]:
     resp = requests.get(TWSE_LISTING_URL, timeout=15)
     resp.raise_for_status()
-    return [f"{item['Code']}.TW" for item in resp.json() if item.get("Code")]
+    symbols = []
+    for item in resp.json():
+        code = item.get("Code", "")
+        if not code:
+            continue
+        # Keep regular stocks (4-digit, 1–9 prefix) and a curated ETF set.
+        # Exclude warrants/structured products (6-digit 0-prefix) and
+        # anything with letter suffixes (subscription-period ETFs, etc.).
+        if re.fullmatch(r"[0-9]+", code):
+            if re.fullmatch(r"[1-9][0-9]{3}", code) or code in _CORE_ETFS:
+                symbols.append(f"{code}.TW")
+    return symbols
 
 
 def fetch_symbol(
