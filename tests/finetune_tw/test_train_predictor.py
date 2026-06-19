@@ -10,7 +10,7 @@ def test_resolve_amp_bf16():
 
 
 def test_resolve_amp_none():
-    enabled, dtype = _resolve_amp(None)
+    enabled, dtype = _resolve_amp("none")
     assert enabled is False
     assert dtype is None
 

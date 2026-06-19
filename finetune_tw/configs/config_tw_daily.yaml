@@ -1,5 +1,5 @@
 # Reference config for TWSE daily fine-tuning
-db_path: "/home/james/kronos_data/tw_stocks.db"
+db_path: "finetune_tw/data/tw_stocks.db"
 lookback_window: 90
 predict_window: 10
 max_context: 512
