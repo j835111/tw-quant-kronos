@@ -36,6 +36,8 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         p.requires_grad_(False)
 
     model = Kronos.from_pretrained(cfg.pretrained_predictor).to(device)
+    amp_enabled, amp_dtype = _resolve_amp(cfg.amp_dtype)
+    amp_enabled = amp_enabled and device.type == "cuda"
 
     save_dir = Path(cfg.output_dir) / cfg.exp_name / "predictor"
     ckpt_dir = save_dir / "checkpoints"
@@ -77,8 +79,9 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
             token_in  = [token_s1[:, :-1], token_s2[:, :-1]]
             token_out = [token_s1[:, 1:],  token_s2[:, 1:]]
 
-            logits = model(token_in[0], token_in[1], batch_x_stamp[:, :-1, :])
-            loss, _, _ = model.head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
+                logits = model(token_in[0], token_in[1], batch_x_stamp[:, :-1, :])
+                loss, _, _ = model.head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
 
             optimizer.zero_grad()
             loss.backward()
@@ -96,7 +99,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
             if max_steps > 0 and global_step >= max_steps:
                 return
 
-        val_loss = _validate_predictor(model, tokenizer, val_loader, device)
+        val_loss = _validate_predictor(model, tokenizer, val_loader, device, amp_enabled, amp_dtype)
         with open(log_path, "a") as f:
             f.write(f"{epoch+1},{global_step},{loss.item():.4f},{val_loss:.4f}\n")
 
@@ -106,8 +109,9 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
             print(f"  -> new best val_loss={val_loss:.4f}, saved.")
 
 
-def _validate_predictor(model, tokenizer, loader, device) -> float:
+def _validate_predictor(model, tokenizer, loader, device, amp_enabled=False, amp_dtype=None) -> float:
     model.eval()
+    amp_enabled = amp_enabled and device.type == "cuda"
     total, count = 0.0, 0
     with torch.no_grad():
         for batch_x, batch_x_stamp in loader:
@@ -116,8 +120,9 @@ def _validate_predictor(model, tokenizer, loader, device) -> float:
             token_s1, token_s2 = tokenizer.encode(batch_x, half=True)
             token_in  = [token_s1[:, :-1], token_s2[:, :-1]]
             token_out = [token_s1[:, 1:],  token_s2[:, 1:]]
-            logits = model(token_in[0], token_in[1], batch_x_stamp[:, :-1, :])
-            loss, _, _ = model.head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
+                logits = model(token_in[0], token_in[1], batch_x_stamp[:, :-1, :])
+                loss, _, _ = model.head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
             total += loss.item() * batch_x.size(0)
             count += batch_x.size(0)
     return total / count if count else 0.0
