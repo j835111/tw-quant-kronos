@@ -79,7 +79,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
             token_in  = [token_s1[:, :-1], token_s2[:, :-1]]
             token_out = [token_s1[:, 1:],  token_s2[:, 1:]]
 
-            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
+            with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled):
                 logits = model(token_in[0], token_in[1], batch_x_stamp[:, :-1, :])
                 loss, _, _ = model.head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
 
@@ -120,7 +120,7 @@ def _validate_predictor(model, tokenizer, loader, device, amp_enabled=False, amp
             token_s1, token_s2 = tokenizer.encode(batch_x, half=True)
             token_in  = [token_s1[:, :-1], token_s2[:, :-1]]
             token_out = [token_s1[:, 1:],  token_s2[:, 1:]]
-            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
+            with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled):
                 logits = model(token_in[0], token_in[1], batch_x_stamp[:, :-1, :])
                 loss, _, _ = model.head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
             total += loss.item() * batch_x.size(0)
