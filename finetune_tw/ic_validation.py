@@ -123,7 +123,7 @@ def validate_predictor_ic(
                 pred_len,
             )
             for offset, pred in enumerate(preds):
-                if pred is None or len(pred) < pred_len:
+                if pred is None or len(pred) < horizons:
                     continue
                 index = start + offset
                 rows.append(
