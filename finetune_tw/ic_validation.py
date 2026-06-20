@@ -77,3 +77,81 @@ class EarlyStopper:
 
         self._bad += 1
         return False, self._bad > self.patience
+
+
+def validate_predictor_ic(
+    predict_batch_fn,
+    actual_lookup,
+    val_universe,
+    val_dates,
+    cfg,
+    build_ctx_fn,
+    batch_size=64,
+) -> float:
+    """Mean cross-sectional rank IC over h1..cfg.val_ic_horizons on a val subset."""
+    pred_len = cfg.pred_len
+    horizons = min(cfg.val_ic_horizons, pred_len)
+    per_group = {}
+
+    for date in val_dates:
+        syms = []
+        dfs = []
+        x_timestamps = []
+        y_timestamps = []
+        last_dates = []
+        ctx_closes = []
+
+        for sym in val_universe:
+            built = build_ctx_fn(sym, date)
+            if built is None:
+                continue
+            ctx_df, x_ts, y_ts, last_date, ctx_close = built
+            syms.append(sym)
+            dfs.append(ctx_df)
+            x_timestamps.append(x_ts)
+            y_timestamps.append(y_ts)
+            last_dates.append(last_date)
+            ctx_closes.append(ctx_close)
+
+        rows = []
+        for start in range(0, len(syms), batch_size):
+            stop = start + batch_size
+            preds = predict_batch_fn(
+                dfs[start:stop],
+                x_timestamps[start:stop],
+                y_timestamps[start:stop],
+                pred_len,
+            )
+            for offset, pred in enumerate(preds):
+                if pred is None or len(pred) < pred_len:
+                    continue
+                index = start + offset
+                rows.append(
+                    (
+                        syms[index],
+                        pred["close"].values.astype(float),
+                        float(ctx_closes[index]),
+                        last_dates[index],
+                    )
+                )
+
+        for horizon in range(horizons):
+            pred_returns = []
+            actual_returns = []
+            for sym, pred_close, ctx_close, last_date in rows:
+                actual_close = np.asarray(
+                    actual_lookup(sym, last_date, pred_len),
+                    dtype=float,
+                )
+                if len(actual_close) <= horizon:
+                    continue
+                pred_returns.append(pred_close[horizon] / ctx_close - 1.0)
+                actual_returns.append(actual_close[horizon] / ctx_close - 1.0)
+
+            if len(pred_returns) >= 3:
+                per_group[(pd.Timestamp(date), horizon + 1)] = (
+                    pred_returns,
+                    actual_returns,
+                )
+
+    return mean_cross_sectional_ic(per_group)
