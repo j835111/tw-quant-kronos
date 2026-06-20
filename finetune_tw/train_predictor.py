@@ -14,7 +14,7 @@ import torch
 from torch.cuda.amp import GradScaler
 from torch.utils.data import DataLoader
 
-from model import Kronos, KronosTokenizer
+from model import Kronos, KronosTokenizer, KronosPredictor
 from finetune_tw.config import Config
 from finetune_tw.dataset import MultiStockDataset
 from finetune_tw.db import list_symbols, query_symbol
@@ -171,7 +171,6 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
     if not log_path.exists():
         log_path.write_text("epoch,step,train_loss,val_loss,val_ic\n")
 
-    from model import KronosPredictor
     predictor = KronosPredictor(model, tokenizer, device=device, max_context=cfg.max_context)
     all_syms = [s for s in list_symbols(cfg.db_path) if s != cfg.benchmark_symbol]
     val_universe = pick_val_universe(all_syms, cfg.ic_val_symbols, cfg.seed)
@@ -179,7 +178,12 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
     buffer_start = (pd.Timestamp(cfg.train_end_date) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
     actual_cache = {}
     for sym in val_universe:
-        df = query_symbol(cfg.db_path, sym, start=buffer_start, end=cfg.val_end_date)
+        df = query_symbol(
+            cfg.db_path,
+            sym,
+            start=buffer_start,
+            end=(pd.Timestamp(cfg.val_end_date) + pd.Timedelta(days=cfg.pred_len * 3)).strftime("%Y-%m-%d"),
+        )
         if len(df):
             actual_cache[sym] = pd.Series(df["close"].values, index=pd.DatetimeIndex(df["date"]))
     stopper = EarlyStopper(patience=cfg.early_stop_patience, mode="max")
