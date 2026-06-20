@@ -1,9 +1,10 @@
 import torch
 import pandas as pd
+from pathlib import Path
 
 from finetune_tw.config import Config
 from finetune_tw.db import init_db, upsert_prices
-from finetune_tw.train_predictor import _build_ctx_for_date, _resolve_amp
+from finetune_tw.train_predictor import _build_ctx_for_date, _resolve_amp, _token_cache_paths
 
 
 def test_config_accepts_training_control_fields():
@@ -98,3 +99,9 @@ def test_build_ctx_for_date_insufficient_returns_none(tmp_path):
     cfg = Config(db_path=db, lookback_window=90, pred_len=10)
 
     assert _build_ctx_for_date(cfg, "9999", pd.Timestamp("2024-01-15")) is None
+
+
+def test_token_cache_paths_are_split_specific(tmp_path):
+    path = _token_cache_paths(Path(tmp_path), "train")
+    assert path["data"].name == "train_token_cache.pt"
+    assert path["meta"].name == "train_token_cache_meta.json"

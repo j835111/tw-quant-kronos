@@ -4,6 +4,7 @@ Requires: tokenizer best_model saved by train_tokenizer.py
 """
 from __future__ import annotations
 import argparse
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -12,7 +13,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.cuda.amp import GradScaler
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 from model import Kronos, KronosTokenizer, KronosPredictor
 from finetune_tw.config import Config
@@ -81,6 +82,81 @@ def _resolve_amp(amp_dtype: str) -> tuple[bool, "torch.dtype | None"]:
     if amp_dtype == "fp16":
         return True, torch.float16
     return False, None
+
+
+class CachedTokenDataset(Dataset):
+    def __init__(self, cache_file: Path) -> None:
+        payload = torch.load(cache_file, map_location="cpu", weights_only=True)
+        self.token_s1 = payload["token_s1"]
+        self.token_s2 = payload["token_s2"]
+        self.stamps = payload["stamps"]
+
+    def __len__(self) -> int:
+        return self.token_s1.shape[0]
+
+    def __getitem__(self, idx: int):
+        return self.token_s1[idx], self.token_s2[idx], self.stamps[idx]
+
+
+def _token_cache_paths(cache_dir: Path, split: str) -> dict[str, Path]:
+    return {
+        "data": cache_dir / f"{split}_token_cache.pt",
+        "meta": cache_dir / f"{split}_token_cache_meta.json",
+    }
+
+
+def _token_cache_storage_dtype(cache_dtype: str) -> torch.dtype:
+    if cache_dtype == "uint16":
+        return torch.uint16
+    if cache_dtype == "int32":
+        return torch.int32
+    raise ValueError(f"Unsupported token cache dtype: {cache_dtype}")
+
+
+def _build_token_cache(
+    dataset,
+    tokenizer,
+    device,
+    cache_dir: Path,
+    split: str,
+    batch_size: int,
+    cache_dtype: str = "uint16",
+) -> Path:
+    paths = _token_cache_paths(cache_dir, split)
+    if paths["data"].exists() and paths["meta"].exists():
+        return paths["data"]
+
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    storage_dtype = _token_cache_storage_dtype(cache_dtype)
+    token_s1_parts, token_s2_parts, stamp_parts = [], [], []
+
+    tokenizer.eval()
+    with torch.no_grad():
+        for batch_x, batch_x_stamp in loader:
+            batch_x = batch_x.to(device, non_blocking=True)
+            token_s1, token_s2 = tokenizer.encode(batch_x, half=True)
+            token_s1_parts.append(token_s1.cpu().to(storage_dtype))
+            token_s2_parts.append(token_s2.cpu().to(storage_dtype))
+            stamp_parts.append(batch_x_stamp.to(torch.float32))
+
+    payload = {
+        "token_s1": torch.cat(token_s1_parts, dim=0),
+        "token_s2": torch.cat(token_s2_parts, dim=0),
+        "stamps": torch.cat(stamp_parts, dim=0),
+    }
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, paths["data"])
+    paths["meta"].write_text(
+        json.dumps(
+            {
+                "split": split,
+                "rows": int(payload["token_s1"].shape[0]),
+                "token_cache_dtype": cache_dtype,
+            },
+            indent=2,
+        )
+    )
+    return paths["data"]
 
 
 def _build_ctx_for_date(cfg, sym, rebal_date):
