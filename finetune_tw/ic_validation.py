@@ -4,6 +4,8 @@ for selecting predictor checkpoints by forecast skill instead of token CE.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -46,3 +48,32 @@ def pick_val_dates(start: str, end: str, n: int) -> list:
         return list(bdays)
     pos = np.linspace(0, len(bdays) - 1, n).round().astype(int)
     return [bdays[i] for i in sorted(set(pos.tolist()))]
+
+
+class EarlyStopper:
+    """Track the best validation metric and stop after repeated non-improvement."""
+
+    def __init__(self, patience: int = 2, mode: str = "max"):
+        self.patience = patience
+        self.mode = mode
+        self.best = None
+        self._bad = 0
+
+    def update(self, value):
+        """Return (is_best, should_stop) for the latest metric value."""
+        improved = False
+        if value is not None:
+            numeric_value = float(value)
+            if not math.isnan(numeric_value):
+                improved = self.best is None or (
+                    numeric_value > self.best
+                    if self.mode == "max"
+                    else numeric_value < self.best
+                )
+                if improved:
+                    self.best = numeric_value
+                    self._bad = 0
+                    return True, False
+
+        self._bad += 1
+        return False, self._bad > self.patience

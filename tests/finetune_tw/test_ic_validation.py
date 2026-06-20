@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 from finetune_tw.ic_validation import (
+    EarlyStopper,
     mean_cross_sectional_ic,
     pick_val_dates,
     pick_val_universe,
@@ -62,3 +63,32 @@ def test_pick_val_dates_count_and_bounds():
     assert dates == sorted(dates)
     assert dates[0] >= pd.Timestamp("2024-01-01")
     assert dates[-1] <= pd.Timestamp("2024-06-30")
+
+
+def test_early_stopper_first_value_is_best():
+    es = EarlyStopper(patience=2, mode="max")
+    is_best, stop = es.update(0.1)
+    assert is_best and not stop
+    assert es.best == 0.1
+
+
+def test_early_stopper_improvement_resets_patience():
+    es = EarlyStopper(patience=2, mode="max")
+    es.update(0.1)
+    is_best, stop = es.update(0.2)
+    assert is_best and not stop
+
+
+def test_early_stopper_stops_after_patience():
+    es = EarlyStopper(patience=2, mode="max")
+    es.update(0.3)
+    assert es.update(0.2) == (False, False)
+    assert es.update(0.1) == (False, False)
+    assert es.update(0.1) == (False, True)
+
+
+def test_early_stopper_nan_counts_as_no_improvement():
+    es = EarlyStopper(patience=1, mode="max")
+    es.update(0.3)
+    assert es.update(float("nan")) == (False, False)
+    assert es.update(float("nan")) == (False, True)
