@@ -31,6 +31,16 @@ def test_build_portfolio_returns_shape():
         "A": pd.Series([100.0 + i for i in range(10)], index=dates),
         "B": pd.Series([200.0 - i for i in range(10)], index=dates),
     }
-    holdings = [{"A", "B"}] * 9  # 9 rebalance periods
-    returns = build_portfolio_returns(price_data, holdings, dates[:-1])
-    assert len(returns) == 9
+    holdings = [{"A", "B"}] * 9  # one holdings set per hold period (len(dates) - 1)
+    period_returns, daily_returns = build_portfolio_returns(price_data, holdings, dates)
+
+    # one period return per rebalance interval, indexed by all but the last date
+    assert isinstance(period_returns, pd.Series)
+    assert len(period_returns) == 9
+    assert list(period_returns.index) == list(dates[:-1])
+    # equal-weight A(+1/day) and B(-1/day) over the first interval: (0.01 + -0.005)/2
+    assert period_returns.iloc[0] == pytest.approx((0.01 + (-0.005)) / 2)
+
+    # daily returns aggregated across hold periods, non-empty
+    assert isinstance(daily_returns, pd.Series)
+    assert len(daily_returns) > 0

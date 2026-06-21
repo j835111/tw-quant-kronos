@@ -74,6 +74,18 @@ python -m finetune_tw.backtest --config $CONFIG
 # For Colab: open finetune_tw/colab_setup.ipynb
 ```
 
+### Finetune (Taiwan stocks / MoLab)
+使用 `finetune_tw/molab_train.py`，在 [molab.marimo.io](https://molab.marimo.io) 開啟：
+
+1. 新建 notebook，點右上角 notebook specs → 啟用 GPU
+2. 執行所有 cell（Run All）
+
+**持久化儲存：`/mnt/first/`**（sandbox 重啟後資料保留）
+- `/mnt/first/data/tw_stocks.db` — 股價 DB，第一次下載後永久保留
+- `/mnt/first/outputs/` — tokenizer & predictor checkpoint，重啟後自動 resume
+
+> **注意**：VM filesystem（`/home/marimo/`、`/tmp/` 等）每次 sandbox 重啟會清空，只有 `/mnt/first/` 是持久的。不需要 rclone 或 Google Drive 備份。
+
 ### Finetune (Taiwan stocks / Colab)
 使用 `finetune_tw/colab_setup.ipynb`，按 cell 順序執行：
 

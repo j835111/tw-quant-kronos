@@ -27,12 +27,21 @@ class Config:
     num_workers: int = 2
     amp_dtype: str = "bf16"
     seed: int = 42
+    # Early stopping / price-space validation
+    early_stop_patience: int = 2
+    ic_val_symbols: int = 150
+    ic_val_dates: int = 8
+    val_ic_horizons: int = 5
 
     # Model paths
     pretrained_tokenizer: str = "NeoQuasar/Kronos-Tokenizer-base"
     pretrained_predictor: str = "NeoQuasar/Kronos-base"
     exp_name: str = "tw_daily"
     output_dir: str = "finetune_tw/outputs"
+
+    # HuggingFace Hub — version control for fine-tuned weights
+    hf_repo: str = "j835111/kronos-tw-finetune"
+    hf_revision: str = "main"
 
     # Backtest
     top_k: int = 20
