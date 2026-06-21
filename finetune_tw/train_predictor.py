@@ -1,22 +1,24 @@
 """
 python finetune_tw/train_predictor.py --config finetune_tw/configs/config_tw_daily.yaml
-Requires: tokenizer best_model (local or on HuggingFace Hub).
+Requires: tokenizer best_model saved by train_tokenizer.py
 """
 from __future__ import annotations
 import argparse
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
 from torch.cuda.amp import GradScaler
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 from model import Kronos, KronosTokenizer, KronosPredictor
 from finetune_tw.config import Config
 from finetune_tw.dataset import MultiStockDataset
 from finetune_tw.db import list_symbols, query_symbol
-from finetune_tw.hf_utils import has_weights, push_best_model, restore_best_model, resolve_src, wait_for_pushes
 from finetune_tw.ic_validation import (
     EarlyStopper,
     pick_val_dates,
@@ -26,6 +28,53 @@ from finetune_tw.ic_validation import (
 from finetune_tw.train_tokenizer import _load_latest_checkpoint, _save_checkpoint
 
 
+def _gdrive_sync(local_dir: Path, remote: str = "gdrive:Kronos/outputs") -> None:
+    """Sync local_dir to Google Drive in background. Silently skips if rclone not found."""
+    if shutil.which("rclone") is None:
+        return
+    rel = local_dir.name
+    subprocess.Popen(
+        ["rclone", "sync", str(local_dir), f"{remote}/{rel}", "--transfers=4"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    print(f"  [gdrive] sync started (background) → {remote}/{rel}")
+
+
+def _gdrive_sync_logs(log_path: Path, remote: str) -> None:
+    """Upload train_log.csv to Drive (fixes the lost-log gap)."""
+    if shutil.which("rclone") is None or not log_path.exists():
+        return
+    subprocess.Popen(
+        ["rclone", "copy", str(log_path), remote],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _gdrive_restore_checkpoints(ckpt_dir: Path, remote: str) -> None:
+    """啟動時，若本地無 ckpt，從 Drive 拉回。"""
+    if shutil.which("rclone") is None or list(ckpt_dir.glob("ckpt-*.pt")):
+        return
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(
+        ["rclone", "copy", remote, str(ckpt_dir), "--transfers=4"],
+        capture_output=True, text=True, timeout=300,
+    )
+    n = len(list(ckpt_dir.glob("ckpt-*.pt")))
+    if n:
+        print(f"  [gdrive] restored {n} checkpoint(s) from {remote}")
+
+
+def _gdrive_sync_checkpoint(ckpt_path: Path, remote_ckpt_dir: str) -> None:
+    """每次存 checkpoint 後，背景上傳到 Drive（不阻塞訓練）。"""
+    if shutil.which("rclone") is None:
+        return
+    subprocess.Popen(
+        ["rclone", "copy", str(ckpt_path), remote_ckpt_dir, "--transfers=4"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
 def _resolve_amp(amp_dtype: str) -> tuple[bool, "torch.dtype | None"]:
     """Map config amp_dtype to (autocast_enabled, dtype). Supports bf16 and fp16."""
     if amp_dtype == "bf16":
@@ -33,6 +82,93 @@ def _resolve_amp(amp_dtype: str) -> tuple[bool, "torch.dtype | None"]:
     if amp_dtype == "fp16":
         return True, torch.float16
     return False, None
+
+
+class CachedTokenDataset(Dataset):
+    def __init__(self, cache_file: Path) -> None:
+        payload = torch.load(cache_file, map_location="cpu", weights_only=True)
+        self.token_s1 = payload["token_s1"]
+        self.token_s2 = payload["token_s2"]
+        self.stamps = payload["stamps"]
+
+    def __len__(self) -> int:
+        return self.token_s1.shape[0]
+
+    def __getitem__(self, idx: int):
+        return self.token_s1[idx], self.token_s2[idx], self.stamps[idx]
+
+
+def _token_cache_paths(cache_dir: Path, split: str) -> dict[str, Path]:
+    return {
+        "data": cache_dir / f"{split}_token_cache.pt",
+        "meta": cache_dir / f"{split}_token_cache_meta.json",
+    }
+
+
+def _token_cache_storage_dtype(cache_dtype: str) -> torch.dtype:
+    if cache_dtype == "uint16":
+        return torch.uint16
+    if cache_dtype == "int32":
+        return torch.int32
+    raise ValueError(f"Unsupported token cache dtype: {cache_dtype}")
+
+
+def _build_token_cache(
+    dataset,
+    tokenizer,
+    device,
+    cache_dir: Path,
+    split: str,
+    batch_size: int,
+    cache_dtype: str = "uint16",
+) -> Path:
+    paths = _token_cache_paths(cache_dir, split)
+    if paths["data"].exists() and paths["meta"].exists():
+        return paths["data"]
+
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    storage_dtype = _token_cache_storage_dtype(cache_dtype)
+    token_s1_parts, token_s2_parts, stamp_parts = [], [], []
+
+    tokenizer.eval()
+    with torch.no_grad():
+        for batch_x, batch_x_stamp in loader:
+            batch_x = batch_x.to(device, non_blocking=True)
+            token_s1, token_s2 = tokenizer.encode(batch_x, half=True)
+            token_s1_parts.append(token_s1.cpu().to(storage_dtype))
+            token_s2_parts.append(token_s2.cpu().to(storage_dtype))
+            stamp_parts.append(batch_x_stamp.to(torch.float32))
+
+    payload = {
+        "token_s1": torch.cat(token_s1_parts, dim=0),
+        "token_s2": torch.cat(token_s2_parts, dim=0),
+        "stamps": torch.cat(stamp_parts, dim=0),
+    }
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, paths["data"])
+    paths["meta"].write_text(
+        json.dumps(
+            {
+                "split": split,
+                "rows": int(payload["token_s1"].shape[0]),
+                "token_cache_dtype": cache_dtype,
+            },
+            indent=2,
+        )
+    )
+    return paths["data"]
+
+
+def _steps_for_epoch(loader_len: int, step_cap: int) -> int:
+    return min(loader_len, step_cap) if step_cap > 0 else loader_len
+
+
+def _configure_cuda_runtime(device: torch.device, enable_tf32: bool) -> None:
+    if device.type != "cuda" or not enable_tf32:
+        return
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
 
 def _build_ctx_for_date(cfg, sym, rebal_date):
@@ -79,18 +215,13 @@ def _make_predict_batch_fn(predictor):
 def run_training(cfg: Config, max_steps: int = -1) -> None:
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
+    _configure_cuda_runtime(device, cfg.enable_tf32)
 
-    exp_dir = Path(cfg.output_dir) / cfg.exp_name
-    tok_path = exp_dir / "tokenizer" / "best_model"
-    restore_best_model(exp_dir, cfg.hf_repo, "tokenizer/best_model", cfg.hf_revision)
-    if not has_weights(tok_path):
-        raise FileNotFoundError(
-            f"Tokenizer weights not found at {tok_path} and could not be restored from HF. "
-            "Run train_tokenizer.py first or set HF_TOKEN."
-        )
+    tok_path = Path(cfg.output_dir) / cfg.exp_name / "tokenizer" / "best_model"
+    if not tok_path.exists():
+        raise FileNotFoundError(f"Tokenizer not found at {tok_path}. Run train_tokenizer.py first.")
 
-    tok_src, tok_kwargs = resolve_src(tok_path, cfg.hf_repo, "tokenizer/best_model", cfg.hf_revision)
-    tokenizer = KronosTokenizer.from_pretrained(tok_src, **tok_kwargs).to(device)
+    tokenizer = KronosTokenizer.from_pretrained(str(tok_path)).to(device)
     tokenizer.eval()
     for p in tokenizer.parameters():
         p.requires_grad_(False)
@@ -100,8 +231,9 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
     amp_enabled = amp_enabled and device.type == "cuda"
     scaler = GradScaler() if (amp_enabled and amp_dtype == torch.float16) else None
 
-    save_dir = exp_dir / "predictor"
+    save_dir = Path(cfg.output_dir) / cfg.exp_name / "predictor"
     ckpt_dir = save_dir / "checkpoints"
+    remote_root = f"gdrive:Kronos/outputs/{cfg.exp_name}/predictor"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     train_ds = MultiStockDataset(cfg.db_path, cfg.lookback_window, cfg.predict_window,
@@ -109,19 +241,70 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
     val_ds   = MultiStockDataset(cfg.db_path, cfg.lookback_window, cfg.predict_window,
                                  cfg.train_end_date, cfg.val_end_date, cfg.clip, cfg.seed + 1)
 
-    train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True,
-                              num_workers=cfg.num_workers, pin_memory=True, drop_last=True)
-    val_loader   = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False,
-                              num_workers=cfg.num_workers, pin_memory=True)
+    train_loader_kwargs = {
+        "num_workers": cfg.num_workers,
+        "pin_memory": True,
+        "drop_last": True,
+    }
+    val_loader_kwargs = {
+        "num_workers": cfg.num_workers,
+        "pin_memory": True,
+    }
+    if cfg.num_workers > 0:
+        train_loader_kwargs["persistent_workers"] = cfg.persistent_workers
+        train_loader_kwargs["prefetch_factor"] = cfg.prefetch_factor
+        val_loader_kwargs["persistent_workers"] = cfg.persistent_workers
+        val_loader_kwargs["prefetch_factor"] = cfg.prefetch_factor
+
+    cache_dir = Path(cfg.output_dir) / cfg.exp_name / "token_cache"
+    if cfg.token_cache_enabled:
+        train_cache = _build_token_cache(
+            train_ds,
+            tokenizer,
+            device,
+            cache_dir,
+            "train",
+            cfg.batch_size,
+            cfg.token_cache_dtype,
+        )
+        val_cache = _build_token_cache(
+            val_ds,
+            tokenizer,
+            device,
+            cache_dir,
+            "val",
+            cfg.batch_size,
+            cfg.token_cache_dtype,
+        )
+        train_loader = DataLoader(
+            CachedTokenDataset(train_cache),
+            batch_size=cfg.batch_size,
+            shuffle=True,
+            **train_loader_kwargs,
+        )
+        val_loader = DataLoader(
+            CachedTokenDataset(val_cache),
+            batch_size=cfg.batch_size,
+            shuffle=False,
+            **val_loader_kwargs,
+        )
+    else:
+        train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True,
+                                  **train_loader_kwargs)
+        val_loader   = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False,
+                                  **val_loader_kwargs)
+
+    train_steps_per_epoch = _steps_for_epoch(len(train_loader), cfg.train_steps_per_epoch)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.predictor_lr,
                                   betas=(cfg.adam_beta1, cfg.adam_beta2),
                                   weight_decay=cfg.adam_weight_decay)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=cfg.predictor_lr,
-        steps_per_epoch=len(train_loader), epochs=cfg.basemodel_epochs,
+        steps_per_epoch=train_steps_per_epoch, epochs=cfg.basemodel_epochs,
         pct_start=0.03, div_factor=10,
     )
+    _gdrive_restore_checkpoints(ckpt_dir, f"{remote_root}/checkpoints")
     start_epoch, global_step = _load_latest_checkpoint(ckpt_dir, model, optimizer, scheduler)
     log_path = save_dir / "train_log.csv"
     if not log_path.exists():
@@ -146,21 +329,35 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
 
     for epoch in range(start_epoch, cfg.basemodel_epochs):
         model.train()
-        for batch_x, batch_x_stamp in train_loader:
-            batch_x       = batch_x.to(device, non_blocking=True)
-            batch_x_stamp = batch_x_stamp.to(device, non_blocking=True)
+        steps_this_epoch = train_steps_per_epoch
+        for step_idx, batch in enumerate(train_loader):
+            if step_idx >= steps_this_epoch:
+                break
 
-            with torch.no_grad():
-                token_s1, token_s2 = tokenizer.encode(batch_x, half=True)
+            if cfg.token_cache_enabled:
+                token_s1, token_s2, batch_x_stamp = batch
+                token_s1 = token_s1.to(device=device, dtype=torch.long, non_blocking=True)
+                token_s2 = token_s2.to(device=device, dtype=torch.long, non_blocking=True)
+                batch_x_stamp = batch_x_stamp.to(device, non_blocking=True)
+            else:
+                batch_x, batch_x_stamp = batch
+                batch_x = batch_x.to(device, non_blocking=True)
+                batch_x_stamp = batch_x_stamp.to(device, non_blocking=True)
+                with torch.no_grad():
+                    token_s1, token_s2 = tokenizer.encode(batch_x, half=True)
 
             token_in  = [token_s1[:, :-1], token_s2[:, :-1]]
             token_out = [token_s1[:, 1:],  token_s2[:, 1:]]
 
-            with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled):
+            with torch.autocast(
+                device_type=device.type,
+                dtype=amp_dtype or torch.bfloat16,
+                enabled=amp_enabled,
+            ):
                 logits = model(token_in[0], token_in[1], batch_x_stamp[:, :-1, :])
                 loss, _, _ = model.head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             if scaler is not None:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
@@ -179,11 +376,21 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
 
             if global_step % cfg.save_steps == 0:
                 _save_checkpoint(ckpt_dir, global_step, epoch, model, optimizer, scheduler)
+                _gdrive_sync_checkpoint(ckpt_dir / f"ckpt-{global_step}.pt", f"{remote_root}/checkpoints")
 
             if max_steps > 0 and global_step >= max_steps:
                 return
 
-        val_loss = _validate_predictor(model, tokenizer, val_loader, device, amp_enabled, amp_dtype)
+        val_loss = _validate_predictor(
+            model,
+            tokenizer,
+            val_loader,
+            device,
+            amp_enabled,
+            amp_dtype,
+            cfg.token_cache_enabled,
+            cfg.val_steps_per_epoch,
+        )
         model.eval()
         val_ic = validate_predictor_ic(
             _make_predict_batch_fn(predictor),
@@ -200,30 +407,53 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         if is_best:
             model.save_pretrained(str(save_dir / "best_model"))
             print(f"  -> new best val_ic={val_ic:.4f} (val_loss={val_loss:.4f}), saved.")
-            push_best_model(save_dir / "best_model", cfg.hf_repo, "predictor/best_model", cfg.hf_revision)
+            _gdrive_sync(save_dir / "best_model", remote=remote_root)
+            _gdrive_sync_logs(log_path, remote_root)
         if should_stop:
             print(f"  -> early stop at epoch {epoch+1} (best val_ic={stopper.best:.4f})")
             break
 
-    wait_for_pushes()
 
-
-def _validate_predictor(model, tokenizer, loader, device, amp_enabled=False, amp_dtype=None) -> float:
+def _validate_predictor(
+    model,
+    tokenizer,
+    loader,
+    device,
+    amp_enabled=False,
+    amp_dtype=None,
+    token_cache_enabled=False,
+    step_cap=0,
+) -> float:
     model.eval()
     amp_enabled = amp_enabled and device.type == "cuda"
     total, count = 0.0, 0
+    val_steps = _steps_for_epoch(len(loader), step_cap)
     with torch.no_grad():
-        for batch_x, batch_x_stamp in loader:
-            batch_x       = batch_x.to(device)
-            batch_x_stamp = batch_x_stamp.to(device)
-            token_s1, token_s2 = tokenizer.encode(batch_x, half=True)
+        for step_idx, batch in enumerate(loader):
+            if step_idx >= val_steps:
+                break
+
+            if token_cache_enabled:
+                token_s1, token_s2, batch_x_stamp = batch
+                token_s1 = token_s1.to(device=device, dtype=torch.long, non_blocking=True)
+                token_s2 = token_s2.to(device=device, dtype=torch.long, non_blocking=True)
+                batch_x_stamp = batch_x_stamp.to(device, non_blocking=True)
+            else:
+                batch_x, batch_x_stamp = batch
+                batch_x = batch_x.to(device, non_blocking=True)
+                batch_x_stamp = batch_x_stamp.to(device, non_blocking=True)
+                token_s1, token_s2 = tokenizer.encode(batch_x, half=True)
             token_in  = [token_s1[:, :-1], token_s2[:, :-1]]
             token_out = [token_s1[:, 1:],  token_s2[:, 1:]]
-            with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled):
+            with torch.autocast(
+                device_type=device.type,
+                dtype=amp_dtype or torch.bfloat16,
+                enabled=amp_enabled,
+            ):
                 logits = model(token_in[0], token_in[1], batch_x_stamp[:, :-1, :])
                 loss, _, _ = model.head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
-            total += loss.item() * batch_x.size(0)
-            count += batch_x.size(0)
+            total += loss.item() * batch_x_stamp.size(0)
+            count += batch_x_stamp.size(0)
     return total / count if count else 0.0
 
 

@@ -1,6 +1,6 @@
-# RTX Pro 6000 (96 GB VRAM) — large batch for bf16 on Blackwell
+# RTX Pro 6000 (96 GB VRAM) — validated conservative defaults for a 4-core MoLab host
 # Usage: python -m finetune_tw.train_tokenizer --config finetune_tw/configs/config_tw_daily_rtx6000.yaml
-db_path: "/home/james/kronos_data/tw_stocks.db"
+db_path: "/mnt/first/data/tw_stocks.db"
 lookback_window: 90
 predict_window: 10
 max_context: 512
@@ -8,18 +8,25 @@ clip: 5.0
 train_end_date: "2023-12-31"
 val_end_date: "2024-06-30"
 
-tokenizer_epochs: 30
-basemodel_epochs: 20
-batch_size: 256
-save_steps: 500
+tokenizer_epochs: 12
+basemodel_epochs: 10
+batch_size: 384
+save_steps: 2000
 log_interval: 50
 tokenizer_lr: 0.0002
 predictor_lr: 0.00004
 adam_beta1: 0.9
 adam_beta2: 0.95
 adam_weight_decay: 0.1
-num_workers: 8
+num_workers: 4
+persistent_workers: true
+prefetch_factor: 2
+train_steps_per_epoch: 1000
+val_steps_per_epoch: 200
 amp_dtype: "bf16"
+enable_tf32: true
+token_cache_enabled: true
+token_cache_dtype: "uint16"
 seed: 42
 
 pretrained_tokenizer: "NeoQuasar/Kronos-Tokenizer-base"

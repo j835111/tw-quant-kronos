@@ -25,7 +25,14 @@ class Config:
     adam_beta2: float = 0.95
     adam_weight_decay: float = 0.1
     num_workers: int = 2
+    persistent_workers: bool = False
+    prefetch_factor: int = 2
+    train_steps_per_epoch: int = 0
+    val_steps_per_epoch: int = 0
     amp_dtype: str = "bf16"
+    enable_tf32: bool = True
+    token_cache_enabled: bool = False
+    token_cache_dtype: str = "uint16"
     seed: int = 42
     # Early stopping / price-space validation
     early_stop_patience: int = 2
@@ -38,10 +45,6 @@ class Config:
     pretrained_predictor: str = "NeoQuasar/Kronos-base"
     exp_name: str = "tw_daily"
     output_dir: str = "finetune_tw/outputs"
-
-    # HuggingFace Hub — version control for fine-tuned weights
-    hf_repo: str = "j835111/kronos-tw-finetune"
-    hf_revision: str = "main"
 
     # Backtest
     top_k: int = 20

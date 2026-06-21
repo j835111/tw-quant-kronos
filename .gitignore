@@ -77,3 +77,4 @@ tmp/
 
 finetune_tw/data/
 finetune_tw/outputs/
+.worktrees/
