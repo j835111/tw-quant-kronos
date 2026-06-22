@@ -303,8 +303,8 @@ def _run_test_backtest(
         stacker_holdings.append(rank_stocks(stacker_rank, top_k))
         kronos_holdings.append(rank_stocks(kronos_rank, top_k))
 
-    stacker_daily = build_portfolio_returns(close_prices, stacker_holdings, pd.DatetimeIndex(dates))
-    kronos_daily = build_portfolio_returns(close_prices, kronos_holdings, pd.DatetimeIndex(dates))
+    _, stacker_daily = build_portfolio_returns(close_prices, stacker_holdings, pd.DatetimeIndex(dates))
+    _, kronos_daily = build_portfolio_returns(close_prices, kronos_holdings, pd.DatetimeIndex(dates))
 
     bench_frame = frames.get(benchmark_symbol, pd.DataFrame())
     if bench_frame.empty:

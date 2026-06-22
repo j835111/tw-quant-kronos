@@ -56,11 +56,14 @@ def build_portfolio_returns(
     price_data: dict[str, pd.Series],
     holdings_sequence: list[set[str]],
     rebalance_dates: pd.Index,
-) -> pd.Series:
+) -> tuple[pd.Series, pd.Series]:
     all_daily: list[pd.Series] = []
+    period_rets: list[float] = []
+    period_dates: list = []
     for i in range(len(rebalance_dates) - 1):
         date, next_date = rebalance_dates[i], rebalance_dates[i + 1]
         daily_sym_series = []
+        sym_period_rets: list[float] = []
         for sym in holdings_sequence[i]:
             if sym not in price_data:
                 continue
@@ -68,13 +71,18 @@ def build_portfolio_returns(
             sub = series[(series.index >= date) & (series.index <= next_date)]
             if len(sub) >= 2:
                 daily_sym_series.append(sub.pct_change().dropna())
+                sym_period_rets.append(float(sub.iloc[-1] / sub.iloc[0] - 1.0))
         if daily_sym_series:
             all_daily.append(pd.concat(daily_sym_series, axis=1).mean(axis=1))
+        period_rets.append(float(np.mean(sym_period_rets)) if sym_period_rets else 0.0)
+        period_dates.append(date)
 
+    period_returns = pd.Series(period_rets, index=pd.DatetimeIndex(period_dates))
     if not all_daily:
-        return pd.Series(dtype=float)
+        return period_returns, pd.Series(dtype=float)
     dr = pd.concat(all_daily).sort_index()
-    return dr[~dr.index.duplicated(keep="first")]
+    daily_returns = dr[~dr.index.duplicated(keep="first")]
+    return period_returns, daily_returns
 
 
 def signals_to_holdings(
@@ -383,7 +391,7 @@ def run_backtest(cfg: Config, model_key: str, hold_days_list: list[int]) -> Path
         step = hd // min_hold
         variant_dates = fine_dates[::step]
         holdings = signals_to_holdings(raw_preds, variant_dates, hd, cfg.top_k)
-        dr = build_portfolio_returns(close_prices, holdings, variant_dates)
+        _, dr = build_portfolio_returns(close_prices, holdings, variant_dates)
         m = compute_metrics(dr)
         hold_variants[str(hd)] = {
             "dates": [d.strftime("%Y-%m-%d") for d in dr.index],

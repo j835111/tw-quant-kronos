@@ -97,7 +97,7 @@ def _collect_rows_for_date(predict_batch_fn, val_universe, date, cfg, build_ctx_
         preds = predict_batch_fn(dfs[start:stop], x_timestamps[start:stop],
                                  y_timestamps[start:stop], cfg.pred_len)
         for offset, pred in enumerate(preds):
-            if pred is None or len(pred) < cfg.pred_len:
+            if pred is None or len(pred) < getattr(cfg, "val_ic_horizons", cfg.pred_len):
                 continue
             i = start + offset
             rows.append((syms[i], pred["close"].values.astype(float),

@@ -126,7 +126,7 @@ def run_grid_search(
             step = max(1, hd // min_hold)
             variant_dates = fine_dates[::step]
             holdings = signals_to_holdings(raw_preds, variant_dates, hd, top_k)
-            dr = build_portfolio_returns(close_prices, holdings, variant_dates)
+            _, dr = build_portfolio_returns(close_prices, holdings, variant_dates)
             m = compute_metrics(dr)
             results.append({
                 "top_k": top_k,
