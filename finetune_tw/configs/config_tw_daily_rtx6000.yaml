@@ -41,8 +41,8 @@ hf_revision_out: "round-2"
 exp_name: "tw_daily"
 output_dir: "/marimo/Kronos/finetune_tw/outputs"
 
-top_k: 20
-hold_days: 5
+top_k: 10
+hold_days: 3
 pred_len: 10
 test_start_date: "2024-07-01"
 benchmark_symbol: "^TWII"
