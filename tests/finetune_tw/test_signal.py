@@ -98,30 +98,23 @@ def test_extract_date_returns_signals():
 
 
 def test_extract_date_range_returns_dataframe():
-    predictor = _make_mock_predictor([1.05] * 100)
-
+    predictor = _make_mock_predictor([1.05] * 200)
     cfg = MagicMock()
     cfg.db_path = ":memory:"
     cfg.lookback_window = 3
     cfg.pred_len = 5
 
-    extractor = KronosSignalExtractor(predictor, n_samples=2, top_k=40)
+    extractor = KronosSignalExtractor(predictor, n_samples=3, top_k=40)
 
     import finetune_tw.signal as sig_mod
-
-    original = sig_mod.KronosSignalExtractor._load_context
+    original = sig_mod.KronosSignalExtractor._load_context  # capture BEFORE patching
 
     def fake_load_context(self, sym, as_of, cfg):
-        ctx_df = pd.DataFrame(
-            {
-                "open": [1.0, 1.0, 1.0],
-                "high": [1.0, 1.0, 1.0],
-                "low": [1.0, 1.0, 1.0],
-                "close": [1.0, 1.0, 1.0],
-                "volume": [0.0, 0.0, 0.0],
-                "amount": [0.0, 0.0, 0.0],
-            }
-        )
+        ctx_df = pd.DataFrame({
+            "open": [1.0, 1.0, 1.0], "high": [1.0, 1.0, 1.0],
+            "low": [1.0, 1.0, 1.0], "close": [1.0, 1.0, 1.0],
+            "volume": [0.0, 0.0, 0.0], "amount": [0.0, 0.0, 0.0],
+        })
         x_ts = pd.Series(pd.date_range("2024-01-01", periods=3, freq="B"))
         y_ts = pd.Series(pd.date_range("2024-01-04", periods=5, freq="B"))
         return ctx_df, x_ts, y_ts
@@ -131,8 +124,7 @@ def test_extract_date_range_returns_dataframe():
         df = extractor.extract_date_range(
             [pd.Timestamp("2024-01-04"), pd.Timestamp("2024-01-05")],
             ["2330.TW", "2317.TW"],
-            cfg,
-            horizon=4,
+            cfg, horizon=4,
         )
     finally:
         sig_mod.KronosSignalExtractor._load_context = original

@@ -111,7 +111,7 @@ class KronosSignalExtractor:
         results: dict[str, KronosSignal] = {}
         for sym, returns in sample_returns.items():
             arr = np.asarray(returns, dtype=float)
-            if len(arr) == 0:
+            if len(arr) < 3:
                 continue
             results[sym] = KronosSignal(
                 mean_return=float(arr.mean()),
