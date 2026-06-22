@@ -58,6 +58,16 @@ class Config:
     test_start_date: str = "2024-07-01"
     benchmark_symbol: str = "^TWII"
 
+    # Stacking meta-model
+    mc_sample_count: int = 20
+    stacking_enabled: bool = False
+    stacking_train_start: str = "2018-01-01"
+    stacking_train_end: str = "2023-12-31"
+    wf_embargo_days: int = 110
+    analog_enabled: bool = False
+    analog_n_neighbors: int = 20
+    analog_window: int = 20
+
     @classmethod
     def from_yaml(cls, path: str) -> "Config":
         with open(path) as f:
