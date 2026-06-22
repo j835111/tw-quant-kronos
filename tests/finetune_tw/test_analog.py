@@ -23,7 +23,7 @@ def test_analog_engine_fit_and_query():
     fake_df = _make_price_df(close)
 
     engine = AnalogEngine(n_neighbors=5, window=10)
-    with patch("finetune_tw.analog.query_symbol", return_value=fake_df),          patch("finetune_tw.analog.list_symbols", return_value=["2330.TW"]):
+    with patch("finetune_tw.analog.query_symbol", return_value=fake_df):
         engine.fit(":memory:", ["2330.TW"], cutoff_date="2020-06-01", pred_len=5)
 
     assert len(engine._keys) > 0
@@ -67,7 +67,7 @@ def test_point_in_time_cutoff():
         return _make_price_df([100.0] * 10)  # too short, will be skipped
 
     engine = AnalogEngine(n_neighbors=5, window=10)
-    with patch("finetune_tw.analog.query_symbol", side_effect=mock_query),          patch("finetune_tw.analog.list_symbols", return_value=["2330.TW"]):
+    with patch("finetune_tw.analog.query_symbol", side_effect=mock_query):
         engine.fit(":memory:", ["2330.TW"], cutoff_date="2024-01-10", pred_len=10)
 
     # The end date passed to query_symbol must be BEFORE cutoff_date

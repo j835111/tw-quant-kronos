@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 import pandas as pd
-from finetune_tw.db import query_symbol, list_symbols
+from finetune_tw.db import query_symbol
 
 
 @dataclass
