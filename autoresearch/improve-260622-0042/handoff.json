@@ -1,0 +1,82 @@
+{
+  "version": "2.1.0",
+  "source": "improve",
+  "timestamp": "2026-06-22T00:42:00",
+  "status": "SATURATED",
+  "results_tsv": "autoresearch/improve-260622-0042/research-findings.md",
+  "config": {
+    "goal": "改善 finetune_tw 台股預測模型 (Round 2)",
+    "icp": "ML研究員/量化工程師，使用 Kronos fine-tuning 台股日線，目標 Sharpe ≥ 1.5",
+    "depth": "standard (15 iterations)",
+    "categories_explored": 5,
+    "insights_total": 12,
+    "prds_generated": 3
+  },
+  "findings": {
+    "must_have": [
+      {
+        "id": "M1",
+        "title": "IC-IR@h5 Early Stopping",
+        "tier": "must-have",
+        "confidence": "HIGH",
+        "prd_path": "autoresearch/improve-260622-0042/prd-ic-ir-early-stopping.md",
+        "effort": "1 hr",
+        "files": ["finetune_tw/ic_validation.py", "finetune_tw/train_predictor.py"]
+      },
+      {
+        "id": "M2",
+        "title": "IC 驗證樣本擴大 (300×20)",
+        "tier": "must-have",
+        "confidence": "HIGH",
+        "prd_path": "autoresearch/improve-260622-0042/prd-validation-sample-expansion.md",
+        "effort": "5 min (config only)",
+        "files": ["finetune_tw/configs/config_tw_daily_rtx6000.yaml"]
+      },
+      {
+        "id": "M3",
+        "title": "Round 0 Predictor 作為訓練起點",
+        "tier": "must-have",
+        "confidence": "HIGH",
+        "prd_path": "autoresearch/improve-260622-0042/prd-round2-training-config.md",
+        "effort": "30 min",
+        "files": ["finetune_tw/config.py", "finetune_tw/configs/config_tw_daily_rtx6000.yaml", "finetune_tw/hf_utils.py"]
+      },
+      {
+        "id": "M4",
+        "title": "Warmup+Cosine Decay LR + 延長至 20 epoch",
+        "tier": "must-have",
+        "confidence": "HIGH",
+        "prd_path": "autoresearch/improve-260622-0042/prd-round2-training-config.md",
+        "effort": "30 min",
+        "files": ["finetune_tw/train_predictor.py", "finetune_tw/configs/config_tw_daily_rtx6000.yaml"]
+      }
+    ],
+    "nice_to_have": [
+      {
+        "id": "N1",
+        "title": "Pairwise Ranking Loss 輔助",
+        "tier": "nice-to-have",
+        "confidence": "MEDIUM",
+        "effort": "2-4 hrs",
+        "round": "Round 3"
+      },
+      {
+        "id": "N2",
+        "title": "Label Horizon Paradox (h3 監督 h5 推理)",
+        "tier": "nice-to-have",
+        "confidence": "MEDIUM",
+        "effort": "1-2 hrs",
+        "round": "Round 3 探索"
+      }
+    ],
+    "moonshot": [
+      {
+        "id": "S1",
+        "title": "Listwise Ranking Loss 完全替換 CE",
+        "tier": "moonshot",
+        "confidence": "LOW",
+        "round": "未定"
+      }
+    ]
+  }
+}

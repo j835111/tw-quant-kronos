@@ -71,6 +71,10 @@ python -m finetune_tw.train_predictor --config $CONFIG
 # 4. Backtest (top-K hold strategy):
 python -m finetune_tw.backtest --config $CONFIG
 
+# 5. [Optional] Grid-search top_k × hold_days (inference once, CPU sweep):
+python -m finetune_tw.grid_search_backtest --config $CONFIG --model round0 \
+    --top_k_list 10 20 30 50 --hold_days_list 3 5 7 10
+
 # For Colab: open finetune_tw/colab_setup.ipynb
 ```
 
@@ -152,6 +156,19 @@ Claude 會：
 - 比較本輪與前輪的 Sharpe、Annual Return、Max Drawdown
 - 判斷是否收斂（連續 2 輪改善 < 1% 視為收斂）
 
+### Step 3.5：策略參數優化（grid_search_backtest）
+
+在調整模型之前，**先跑 grid search** 確認問題是否出在策略參數而非模型能力：
+
+```bash
+python -m finetune_tw.grid_search_backtest --config $CONFIG \
+    --model round0 --top_k_list 10 20 30 50 --hold_days_list 3 5 7 10
+```
+
+> **重要發現（2026-06-22）**：Round 0 模型用 `top_k=10, hold_days=3` 可達 Sharpe 1.84、年化 80%，
+> 而原始設定 `top_k=20, hold_days=5` 只有 Sharpe 1.19、年化 40%。
+> **策略參數的影響遠大於重新訓練。** Round 1 和 Round 2 的 retraining 是在解錯問題。
+
 ### 收斂條件
 
 | 指標 | 目標 | 說明 |
@@ -161,11 +178,21 @@ Claude 會：
 | Max Drawdown | < 20% | |
 | 連續改善幅度 | < 1% | 連續 2 輪則停止 |
 
+### 當前最佳設定（config_tw_daily_rtx6000.yaml）
+
+| 參數 | 值 | 來源 |
+|------|-----|------|
+| `top_k` | 10 | grid search 最佳 |
+| `hold_days` | 3 | grid search 最佳 |
+| `pretrained_predictor` | `j835111/kronos-tw-finetune` | Round 0 fine-tuned |
+| `hf_revision` | `round-0` | HF branch |
+
 ### 注意事項
 
 - 每輪調整前先用 `git commit` 保存當前 config，方便回滾
 - Colab 斷線重連後直接重跑 Cell 6（predictor 支援 resume）
 - 調整 tokenizer 超參數需重跑 Cell 5+6；只調 predictor/backtest 只需重跑 Cell 6+7
+- **先跑 grid_search_backtest 再決定是否要 retrain**
 
 ## Architecture
 
