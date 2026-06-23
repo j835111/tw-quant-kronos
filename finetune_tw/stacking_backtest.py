@@ -437,10 +437,17 @@ def run_stacking_backtest(cfg: Config, force_retrain: bool = False, suffix: str 
         )
         print(f"[stacking] {len(symbols)} symbols, {len(folds)} OOF folds", flush=True)
         for fi, fold in enumerate(folds):
-            print(f"[stacking] fold {fi+1}/{len(folds)}: {fold.val_start} → {fold.val_end}", flush=True)
-            engine = _fit_analog_engine(cfg, symbols, fold.val_start)
-            fold_df = _collect_oof_features(cfg, predictor, engine, symbols, fold)
-            print(f"[stacking] fold {fi+1} done: {len(fold_df)} rows", flush=True)
+            fold_ckpt = out_dir / f"stacking_oof_fold{fi+1}.parquet"
+            if not force_retrain and fold_ckpt.exists():
+                print(f"[stacking] fold {fi+1}/{len(folds)}: resuming from checkpoint {fold_ckpt.name}", flush=True)
+                fold_df = pd.read_parquet(fold_ckpt)
+            else:
+                print(f"[stacking] fold {fi+1}/{len(folds)}: {fold.val_start} → {fold.val_end}", flush=True)
+                engine = _fit_analog_engine(cfg, symbols, fold.val_start)
+                fold_df = _collect_oof_features(cfg, predictor, engine, symbols, fold)
+                print(f"[stacking] fold {fi+1} done: {len(fold_df)} rows", flush=True)
+                if not fold_df.empty:
+                    _save_feature_table(fold_df, fold_ckpt)
             if not fold_df.empty:
                 combined_oof.append(fold_df)
 
@@ -450,6 +457,10 @@ def run_stacking_backtest(cfg: Config, force_retrain: bool = False, suffix: str 
         oof_df = pd.concat(combined_oof).sort_index()
         print(f"[stacking] OOF total: {len(oof_df)} rows → saving parquet", flush=True)
         _save_feature_table(oof_df, oof_path)
+        for fi in range(len(folds)):
+            fold_ckpt = out_dir / f"stacking_oof_fold{fi+1}.parquet"
+            if fold_ckpt.exists():
+                fold_ckpt.unlink()
 
         print("[stacking] fitting LightGBM StackingModel ...", flush=True)
         stacking_model = StackingModel()
