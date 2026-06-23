@@ -337,7 +337,7 @@ def _run_test_backtest(
     }
 
 
-def _plot_stacking(data: dict, out_dir: Path) -> Path:
+def _plot_stacking(data: dict, out_dir: Path, suffix: str = "") -> Path:
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     fig.suptitle(
         f"Stacking Backtest — {data['model_label']}  "
@@ -394,13 +394,13 @@ def _plot_stacking(data: dict, out_dir: Path) -> Path:
     axes[1].legend(fontsize=8)
     axes[1].set_title("Key Metrics")
 
-    out_path = out_dir / "backtest_stacking.png"
+    out_path = out_dir / f"backtest_stacking{suffix}.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return out_path
 
 
-def run_stacking_backtest(cfg: Config, force_retrain: bool = False) -> dict:
+def run_stacking_backtest(cfg: Config, force_retrain: bool = False, suffix: str = "") -> dict:
     if not getattr(cfg, "stacking_enabled", False):
         raise ValueError("cfg.stacking_enabled must be True to run stacking backtest.")
     model_key = getattr(cfg, "model_key", "round0")
@@ -482,9 +482,9 @@ def run_stacking_backtest(cfg: Config, force_retrain: bool = False) -> dict:
     print("[stacking] test backtest done", flush=True)
     result.update(test_result)
 
-    json_path = out_dir / "backtest_stacking.json"
+    json_path = out_dir / f"backtest_stacking{suffix}.json"
     json_path.write_text(json.dumps(result, indent=2))
-    png_path = _plot_stacking(result, out_dir)
+    png_path = _plot_stacking(result, out_dir, suffix=suffix)
     result["artifacts"]["backtest_json"] = str(json_path)
     result["artifacts"]["backtest_png"] = str(png_path)
     return result
@@ -502,6 +502,10 @@ def main() -> None:
     parser.add_argument("--no-analog", action="store_true")
     parser.add_argument("--force-retrain", action="store_true",
                         help="Ignore cached OOF parquet/model and recompute from scratch")
+    parser.add_argument("--mc", type=int, default=None,
+                        help="Override mc_sample_count from config")
+    parser.add_argument("--suffix", type=str, default="",
+                        help="Suffix appended to output filenames (e.g. _mc3)")
     args = parser.parse_args()
 
     cfg = Config.from_yaml(args.config)
@@ -509,8 +513,10 @@ def main() -> None:
     cfg.train_only = args.train_only
     if args.no_analog:
         cfg.analog_enabled = False
+    if args.mc is not None:
+        cfg.mc_sample_count = args.mc
 
-    run_stacking_backtest(cfg, force_retrain=args.force_retrain)
+    run_stacking_backtest(cfg, force_retrain=args.force_retrain, suffix=args.suffix)
 
 
 if __name__ == "__main__":

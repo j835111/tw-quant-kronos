@@ -13,7 +13,7 @@ from model import KronosPredictor
 from finetune_tw.config import Config
 from finetune_tw.db import query_symbol
 
-_BATCH_SIZE = 32
+_BATCH_SIZE = 256
 _PRICE_COLUMNS = ["open", "high", "low", "close", "volume", "amount"]
 
 
