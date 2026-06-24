@@ -36,11 +36,15 @@ class KronosSignalExtractor:
         n_samples: int = 20,
         top_k: int = 40,
         temperature: float = 1.0,
+        mc_candidate_k: int = 0,
     ) -> None:
         self.predictor = predictor
         self.n_samples = n_samples
         self.top_k = top_k
         self.temperature = temperature
+        # If > 0, run MC only on the top-mc_candidate_k symbols by greedy signal.
+        # Reduces MC inference from all symbols to a small candidate pool.
+        self.mc_candidate_k = mc_candidate_k
 
     def _load_context(
         self,
@@ -111,13 +115,22 @@ class KronosSignalExtractor:
                     greedy_returns[sym] = float(pred["close"].iloc[horizon]) / last_closes[sym] - 1.0
 
             # Stochastic MC passes: all n_samples drawn in one batched GPU call per batch
-            for start in range(0, len(sym_list), _BATCH_SIZE):
+            # Optionally restrict to top-mc_candidate_k symbols by greedy signal.
+            mc_syms = sym_list
+            if self.mc_candidate_k > 0 and greedy_returns:
+                mc_syms = sorted(greedy_returns, key=greedy_returns.__getitem__, reverse=True)
+                mc_syms = mc_syms[:self.mc_candidate_k]
+            mc_indices = {sym: sym_list.index(sym) for sym in mc_syms}
+            mc_df_list = [df_list[mc_indices[sym]] for sym in mc_syms]
+            mc_xts_list = [x_ts_list[mc_indices[sym]] for sym in mc_syms]
+            mc_yts_list = [y_ts_list[mc_indices[sym]] for sym in mc_syms]
+            for start in range(0, len(mc_syms), _BATCH_SIZE):
                 stop = start + _BATCH_SIZE
-                batch_syms = sym_list[start:stop]
+                batch_syms = mc_syms[start:stop]
                 all_samples = self.predictor.predict_batch_samples(
-                    df_list=df_list[start:stop],
-                    x_timestamp_list=x_ts_list[start:stop],
-                    y_timestamp_list=y_ts_list[start:stop],
+                    df_list=mc_df_list[start:stop],
+                    x_timestamp_list=mc_xts_list[start:stop],
+                    y_timestamp_list=mc_yts_list[start:stop],
                     pred_len=cfg.pred_len,
                     T=self.temperature,
                     top_k=self.top_k,
