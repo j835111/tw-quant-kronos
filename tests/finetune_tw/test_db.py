@@ -1,6 +1,13 @@
 import pandas as pd
 import pytest
-from finetune_tw.db import init_db, upsert_prices, query_symbol, list_symbols, get_last_date
+from finetune_tw.db import (
+    init_db,
+    upsert_prices,
+    query_symbol,
+    query_symbols_window,
+    list_symbols,
+    get_last_date,
+)
 
 def _make_df(n: int = 5) -> pd.DataFrame:
     dates = pd.date_range("2024-01-01", periods=n, freq="B").strftime("%Y-%m-%d").tolist()
@@ -46,6 +53,52 @@ def test_query_date_filter(tmp_path):
     df = query_symbol(db, "2330.TW", start="2024-01-03", end="2024-01-05")
     assert all(df["date"] >= "2024-01-03")
     assert all(df["date"] <= "2024-01-05")
+
+def test_query_symbols_window_filters_symbols_and_dates(tmp_path):
+    db = str(tmp_path / "test.db")
+    init_db(db)
+    upsert_prices(db, "2330.TW", _make_df(6))
+    upsert_prices(db, "2317.TW", _make_df(6))
+    upsert_prices(db, "2454.TW", _make_df(6))
+
+    df = query_symbols_window(
+        db,
+        ["2330.TW", "2454.TW"],
+        start="2024-01-03",
+        end="2024-01-05",
+    )
+
+    assert list(df.columns) == [
+        "symbol",
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+    ]
+    assert sorted(df["symbol"].unique().tolist()) == ["2330.TW", "2454.TW"]
+    assert all(df["date"] >= "2024-01-03")
+    assert all(df["date"] <= "2024-01-05")
+
+def test_query_symbols_window_empty_symbols_returns_empty_frame(tmp_path):
+    db = str(tmp_path / "test.db")
+    init_db(db)
+
+    df = query_symbols_window(db, [], start="2024-01-01", end="2024-01-05")
+
+    assert df.empty
+    assert list(df.columns) == [
+        "symbol",
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+    ]
 
 def test_list_symbols(tmp_path):
     db = str(tmp_path / "test.db")

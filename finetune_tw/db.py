@@ -65,6 +65,34 @@ def query_symbol(
         return pd.read_sql(q, conn, params=params)
 
 
+def query_symbols_window(
+    db_path: str,
+    symbols: list[str],
+    start: str = None,
+    end: str = None,
+) -> pd.DataFrame:
+    columns = ["symbol", "date", "open", "high", "low", "close", "volume", "amount"]
+    if not symbols:
+        return pd.DataFrame(columns=columns)
+
+    placeholders = ",".join("?" for _ in symbols)
+    q = (
+        "SELECT symbol,date,open,high,low,close,volume,amount "
+        f"FROM daily_prices WHERE symbol IN ({placeholders})"
+    )
+    params: list = list(symbols)
+    if start:
+        q += " AND date>=?"
+        params.append(start)
+    if end:
+        q += " AND date<=?"
+        params.append(end)
+    q += " ORDER BY symbol, date"
+
+    with sqlite3.connect(db_path) as conn:
+        return pd.read_sql(q, conn, params=params)
+
+
 def list_symbols(db_path: str) -> list:
     with sqlite3.connect(db_path) as conn:
         return [r[0] for r in conn.execute("SELECT symbol FROM stocks ORDER BY symbol")]
