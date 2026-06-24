@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+import finetune_tw.db as db_module
 from finetune_tw.db import (
     init_db,
     upsert_prices,
@@ -98,6 +99,46 @@ def test_query_symbols_window_empty_symbols_returns_empty_frame(tmp_path):
         "close",
         "volume",
         "amount",
+    ]
+
+def test_query_symbols_window_chunks_large_symbol_lists(tmp_path, monkeypatch):
+    db = str(tmp_path / "test.db")
+    init_db(db)
+    upsert_prices(db, "2317.TW", _make_df(3))
+    upsert_prices(db, "2330.TW", _make_df(3))
+    upsert_prices(db, "2454.TW", _make_df(3))
+
+    monkeypatch.setattr(db_module, "_QUERY_SYMBOLS_WINDOW_CHUNK_SIZE", 2, raising=False)
+
+    original_read_sql = db_module.pd.read_sql
+    calls = 0
+
+    def counting_read_sql(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_read_sql(*args, **kwargs)
+
+    monkeypatch.setattr(db_module.pd, "read_sql", counting_read_sql)
+
+    df = query_symbols_window(
+        db,
+        ["2330.TW", "2454.TW", "2317.TW"],
+        start="2024-01-01",
+        end="2024-01-03",
+    )
+
+    assert calls == 2
+    assert sorted(df["symbol"].unique().tolist()) == ["2317.TW", "2330.TW", "2454.TW"]
+    assert list(df[["symbol", "date"]].itertuples(index=False, name=None)) == [
+        ("2317.TW", "2024-01-01"),
+        ("2317.TW", "2024-01-02"),
+        ("2317.TW", "2024-01-03"),
+        ("2330.TW", "2024-01-01"),
+        ("2330.TW", "2024-01-02"),
+        ("2330.TW", "2024-01-03"),
+        ("2454.TW", "2024-01-01"),
+        ("2454.TW", "2024-01-02"),
+        ("2454.TW", "2024-01-03"),
     ]
 
 def test_list_symbols(tmp_path):

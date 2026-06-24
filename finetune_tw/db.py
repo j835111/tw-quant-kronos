@@ -2,6 +2,8 @@ import sqlite3
 from pathlib import Path
 import pandas as pd
 
+_QUERY_SYMBOLS_WINDOW_CHUNK_SIZE = 900
+
 
 def init_db(db_path: str) -> None:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -75,22 +77,29 @@ def query_symbols_window(
     if not symbols:
         return pd.DataFrame(columns=columns)
 
-    placeholders = ",".join("?" for _ in symbols)
-    q = (
-        "SELECT symbol,date,open,high,low,close,volume,amount "
-        f"FROM daily_prices WHERE symbol IN ({placeholders})"
-    )
-    params: list = list(symbols)
-    if start:
-        q += " AND date>=?"
-        params.append(start)
-    if end:
-        q += " AND date<=?"
-        params.append(end)
-    q += " ORDER BY symbol, date"
-
     with sqlite3.connect(db_path) as conn:
-        return pd.read_sql(q, conn, params=params)
+        frames: list[pd.DataFrame] = []
+        for i in range(0, len(symbols), _QUERY_SYMBOLS_WINDOW_CHUNK_SIZE):
+            chunk = symbols[i:i + _QUERY_SYMBOLS_WINDOW_CHUNK_SIZE]
+            placeholders = ",".join("?" for _ in chunk)
+            q = (
+                "SELECT symbol,date,open,high,low,close,volume,amount "
+                f"FROM daily_prices WHERE symbol IN ({placeholders})"
+            )
+            params: list = list(chunk)
+            if start:
+                q += " AND date>=?"
+                params.append(start)
+            if end:
+                q += " AND date<=?"
+                params.append(end)
+            q += " ORDER BY symbol, date"
+            frames.append(pd.read_sql(q, conn, params=params))
+
+    return (
+        pd.concat(frames, ignore_index=True)
+        .sort_values(["symbol", "date"], ignore_index=True)
+    )
 
 
 def list_symbols(db_path: str) -> list:
