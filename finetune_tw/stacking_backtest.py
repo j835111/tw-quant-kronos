@@ -249,7 +249,6 @@ def _collect_oof_features(
         predictor,
         n_samples=int(getattr(cfg, "mc_sample_count", 20)),
         top_k=inference_top_k,
-        mc_candidate_k=int(getattr(cfg, "mc_candidate_k", 0)),
     )
     dates = _normalize_dates(cfg, date_range)
     return _build_feature_table(cfg, extractor, engine, symbols, dates, include_target=True,
@@ -272,7 +271,6 @@ def _run_test_backtest(
         predictor,
         n_samples=int(getattr(cfg, "mc_sample_count", 20)),
         top_k=inference_top_k,
-        mc_candidate_k=int(getattr(cfg, "mc_candidate_k", 0)),
     )
     partial_ckpt = (out_dir / "stacking_test_partial.parquet") if out_dir is not None else None
     feature_df = _build_feature_table(
@@ -573,8 +571,6 @@ def main() -> None:
                         help="Override mc_sample_count from config")
     parser.add_argument("--inference-top-k", type=int, default=None,
                         help="Override inference top_k for KronosSignalExtractor (default: max(cfg.top_k*2, 40))")
-    parser.add_argument("--mc-candidate-k", type=int, default=None,
-                        help="Run MC only on top-N symbols by greedy signal (0=all, default 50 recommended)")
     parser.add_argument("--suffix", type=str, default="",
                         help="Suffix appended to output filenames (e.g. _mc3)")
     args = parser.parse_args()
@@ -588,8 +584,6 @@ def main() -> None:
         cfg.mc_sample_count = args.mc
     if args.inference_top_k is not None:
         cfg.mc_inference_top_k = args.inference_top_k
-    if args.mc_candidate_k is not None:
-        cfg.mc_candidate_k = args.mc_candidate_k
 
     run_stacking_backtest(cfg, force_retrain=args.force_retrain, suffix=args.suffix)
 

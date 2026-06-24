@@ -61,7 +61,6 @@ class Config:
 
     # Stacking meta-model
     mc_sample_count: int = 20
-    mc_candidate_k: int = 0  # if >0, run MC only on top-k symbols by greedy signal (speeds up test phase)
     stacking_enabled: bool = False
     stacking_train_start: str = "2018-01-01"
     stacking_train_end: str = "2023-12-31"
