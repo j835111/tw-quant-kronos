@@ -98,7 +98,17 @@ For a rebalance signal generated on trading day `T`:
 - holdings become active at the next trading day open, `T+1`
 - holdings stay active until the next rebalance’s execution open
 
-For hold period `h`, rebalance anchors are still spaced every `h` trading days on the benchmark calendar. The difference is that realized portfolio returns start one trading day later than the signal date.
+`hold_days` is defined as the number of full trading sessions the portfolio remains invested after its execution open.
+
+That means:
+
+- signal anchor `T` is the close that decides the next holdings
+- execution day `E` is the next trading day after `T`
+- for `hold_days = h`, the portfolio fully owns the sessions `E, E+1, ..., E+h-1`
+- the next rebalance signal is generated after the close of the last fully held session
+- the next rebalance execution happens at the following trading day open
+
+Equivalently, rebalance signal anchors remain spaced every `h` trading days on the benchmark calendar, but realized returns begin one trading day later at the corresponding execution open.
 
 ### Return construction
 
@@ -110,14 +120,14 @@ For one rebalance cycle:
 
 1. Signal is observed on anchor day `T`
 2. Execution day `E` is the next trading day after `T`
-3. The next rebalance anchor is `T_next`
+3. The next rebalance anchor `T_next` is the close of the last fully held session
 4. The next execution day `E_next` is the next trading day after `T_next`
 
 Portfolio daily returns are then built as follows:
 
 1. On execution day `E`:
    - portfolio intraday return is computed from the newly selected holdings using `close(E) / open(E) - 1`
-2. For each trading day `D` strictly between `E` and `E_next`:
+2. For each trading day `D` from the first held session after entry through `T_next` close:
    - portfolio daily return is computed from the active holdings using `close(D) / close(prev_trading_day) - 1`
 3. On the next execution day `E_next`:
    - the overnight gap from the previous holdings is realized first as `open(E_next) / close(prev_trading_day) - 1`
@@ -127,12 +137,15 @@ This avoids ambiguity when a symbol remains in the portfolio across consecutive 
 
 Equal-weight portfolio return remains the simple mean of constituent returns for the applicable holdings on each segment.
 
+For internal helper outputs that report one return per rebalance interval, the interval return should represent the outgoing holdings only, measured from the current execution open to the next execution open.
+
 ### Interpretation
 
 This models a portfolio that:
 
 - observes the signal after close on `T`
 - enters at `T+1` open
+- remains invested for exactly `hold_days` full trading sessions after entry
 - marks to market on closes while the position is open
 - realizes the overnight gap into the next rebalance open using the outgoing holdings
 - applies the rebalance day intraday move using the incoming holdings
