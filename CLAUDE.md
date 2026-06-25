@@ -93,10 +93,7 @@ python -m finetune_tw.grid_search_backtest --config $CONFIG --model round0 \
 # 1. Pull 最新程式碼與 DB（fork remote = j835111/Kronos）
 git -C /marimo/Kronos pull fork master
 
-# 2. 安裝 lightgbm（如未安裝）
-uv pip install lightgbm>=4.0
-
-# 3. 需要 HF 登入（下載 predictor checkpoint）
+# 2. 需要 HF 登入（下載 predictor checkpoint）
 huggingface-cli login   # 或設定 HF_TOKEN 環境變數
 ```
 
