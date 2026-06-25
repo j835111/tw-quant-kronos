@@ -94,6 +94,24 @@ def test_load_trading_calendar_uses_benchmark_dates(tmp_path):
     ]
 
 
+def test_load_trading_calendar_raises_for_missing_benchmark_rows(tmp_path):
+    import finetune_tw.backtest_next_open as bo
+
+    db_path = str(tmp_path / "empty_calendar.db")
+    init_db(db_path)
+    cfg = Config(
+        db_path=db_path,
+        benchmark_symbol="^TWII",
+        test_start_date="2024-01-01",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"No benchmark rows found for \^TWII between 2024-01-01 and 2024-01-31\.",
+    ):
+        bo._load_trading_calendar(cfg, end="2024-01-31")
+
+
 def test_build_signal_and_execution_dates_drops_last_anchor_without_next_day():
     import finetune_tw.backtest_next_open as bo
 
@@ -384,3 +402,67 @@ def test_run_backtest_next_open_uses_exact_variant_schedule_for_non_multiple_hol
     assert seen_execution_dates[3] == ["2024-01-03", "2024-01-09"]
     assert seen_signal_dates[5] == ["2024-01-02"]
     assert seen_execution_dates[5] == ["2024-01-03"]
+
+
+def test_run_backtest_next_open_raises_when_variant_has_no_realized_daily_returns(
+    tmp_path,
+    monkeypatch,
+):
+    import finetune_tw.backtest_next_open as bo
+
+    db_path = _seed_runner_db(tmp_path)
+    cfg = Config(
+        db_path=db_path,
+        benchmark_symbol="^TWII",
+        test_start_date="2024-01-01",
+        output_dir=str(tmp_path / "outputs"),
+        exp_name="next_open_case_empty_daily",
+        top_k=1,
+        min_signal_threshold=0.0,
+    )
+
+    monkeypatch.setattr(
+        bo,
+        "build_model_specs",
+        lambda _cfg: {
+            "round0": SimpleNamespace(label="Round 0"),
+        },
+    )
+    monkeypatch.setattr(bo, "load_predictor_from_spec", lambda spec, _cfg: object())
+    monkeypatch.setattr(bo, "_today", lambda: pd.Timestamp("2024-01-09"))
+    monkeypatch.setattr(
+        bo,
+        "compute_raw_signals",
+        lambda predictor, seen_cfg, signal_dates, pred_len, symbols: {
+            d.strftime("%Y-%m-%d"): {
+                sym: pd.Series([0.01] * pred_len) for sym in symbols
+            }
+            for d in signal_dates
+        },
+    )
+    monkeypatch.setattr(
+        bo,
+        "signals_to_holdings",
+        lambda raw_preds, signal_dates, hold_days, top_k, threshold: [
+            {"1101.TW"} for _ in signal_dates
+        ],
+    )
+    monkeypatch.setattr(
+        bo,
+        "build_next_open_portfolio_returns",
+        lambda price_frames, holdings_sequence, execution_dates, trading_dates: (
+            pd.Series(dtype=float),
+            pd.Series(dtype=float),
+        ),
+    )
+    monkeypatch.setattr(
+        bo,
+        "compute_metrics",
+        lambda dr: pytest.fail("compute_metrics() should not be called for empty daily_returns"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"No realized daily returns for hold_days=2",
+    ):
+        bo.run_backtest_next_open(cfg, "round0", [2])

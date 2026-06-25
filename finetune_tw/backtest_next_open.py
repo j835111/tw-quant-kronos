@@ -357,6 +357,11 @@ def run_backtest_next_open(cfg: Config, model_key: str, hold_days_list: list[int
             execution_dates=variant_execution_dates,
             trading_dates=trading_dates,
         )
+        if daily_returns.empty:
+            raise ValueError(
+                f"No realized daily returns for hold_days={hd}. "
+                "Check trading calendar coverage and execution dates."
+            )
         metrics = compute_metrics(daily_returns)
         hold_variants[str(hd)] = {
             "dates": [d.strftime("%Y-%m-%d") for d in daily_returns.index],
