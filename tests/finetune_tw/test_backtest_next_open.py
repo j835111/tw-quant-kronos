@@ -177,3 +177,17 @@ def test_build_next_open_portfolio_returns_preserves_zero_period_when_outgoing_m
     assert daily_returns.iloc[0] == pytest.approx(0.10)
     assert list(period_returns.index.strftime("%Y-%m-%d")) == ["2024-01-03"]
     assert period_returns.iloc[0] == pytest.approx(0.0)
+
+
+def test_build_next_open_portfolio_returns_returns_empty_series_for_zero_executions():
+    import finetune_tw.backtest_next_open as bo
+
+    period_returns, daily_returns = bo.build_next_open_portfolio_returns(
+        price_frames={},
+        holdings_sequence=[],
+        execution_dates=pd.DatetimeIndex([]),
+        trading_dates=pd.DatetimeIndex([]),
+    )
+
+    assert period_returns.empty
+    assert daily_returns.empty

@@ -97,6 +97,8 @@ def build_next_open_portfolio_returns(
         raise ValueError(
             "holdings_sequence and execution_dates must have the same length."
         )
+    if len(execution_dates) == 0:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
 
     daily_values: list[float] = []
     daily_index: list[pd.Timestamp] = []
