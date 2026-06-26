@@ -91,6 +91,7 @@ def compute_raw_signals_open(
     pred_len: int,
     symbols: list[str],
     vol_filter_pct: float = 0.0,
+    attach_pred_frame: bool = False,
 ) -> dict[str, dict[str, pd.Series]]:
     """Like compute_raw_signals but ranks by predicted open[T+h+1]/open[T+1]-1.
 
@@ -138,9 +139,10 @@ def compute_raw_signals_open(
                         returns = (
                             pred_opens.iloc[1:].reset_index(drop=True) / pred_opens.iloc[0] - 1
                         )
-                        returns.attrs["pred_frame"] = pred.loc[
-                            :, ["high", "low", "close"]
-                        ].reset_index(drop=True)
+                        if attach_pred_frame:
+                            returns.attrs["pred_frame"] = pred.loc[
+                                :, ["high", "low", "close"]
+                            ].reset_index(drop=True)
                         date_preds[sym] = returns
                         date_vols[sym] = float(pred["volume"].iloc[0])
 
@@ -530,6 +532,7 @@ def run_backtest_next_open(
         pred_len,
         symbols,
         vol_filter_pct=vol_filter_pct,
+        attach_pred_frame=use_atr_weights,
     )
     del predictor
     torch.cuda.empty_cache()

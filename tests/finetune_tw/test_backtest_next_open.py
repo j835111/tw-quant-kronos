@@ -410,10 +410,9 @@ def test_vol_filter_disabled(monkeypatch):
             default_result[date_key][sym],
             disabled_result[date_key][sym],
         )
-        pd.testing.assert_frame_equal(
-            default_result[date_key][sym].attrs["pred_frame"],
-            disabled_result[date_key][sym].attrs["pred_frame"],
-        )
+        # pred_frame is not attached when attach_pred_frame=False (default)
+        assert "pred_frame" not in default_result[date_key][sym].attrs
+        assert "pred_frame" not in disabled_result[date_key][sym].attrs
 
 
 def test_vol_filter_removes_low_vol(monkeypatch):
@@ -547,6 +546,7 @@ def test_run_backtest_next_open_saves_suffix_outputs_and_schema(tmp_path, monkey
         pred_len,
         symbols,
         vol_filter_pct=0.0,
+        attach_pred_frame=False,
     ):
         assert seen_cfg is cfg
         assert list(signal_dates.strftime("%Y-%m-%d")) == ["2024-01-02", "2024-01-05"]
@@ -622,7 +622,7 @@ def test_run_backtest_next_open_passes_atr_weights_when_enabled(tmp_path, monkey
     monkeypatch.setattr(
         bo,
         "compute_raw_signals",
-        lambda predictor, seen_cfg, signal_dates, pred_len, symbols, vol_filter_pct=0.0: {
+        lambda predictor, seen_cfg, signal_dates, pred_len, symbols, vol_filter_pct=0.0, attach_pred_frame=False: {
             "2024-01-02": {
                 "1101.TW": _make_pred_signal(
                     [0.02, 0.03],
@@ -772,6 +772,7 @@ def test_run_backtest_next_open_uses_exact_variant_schedule_for_non_multiple_hol
         pred_len,
         symbols,
         vol_filter_pct=0.0,
+        attach_pred_frame=False,
     ):
         assert seen_cfg is cfg
         assert list(signal_dates.strftime("%Y-%m-%d")) == ["2024-01-02", "2024-01-08"]
@@ -846,7 +847,7 @@ def test_run_backtest_next_open_raises_when_variant_has_no_realized_daily_return
     monkeypatch.setattr(
         bo,
         "compute_raw_signals",
-        lambda predictor, seen_cfg, signal_dates, pred_len, symbols, vol_filter_pct=0.0: {
+        lambda predictor, seen_cfg, signal_dates, pred_len, symbols, vol_filter_pct=0.0, attach_pred_frame=False: {
             d.strftime("%Y-%m-%d"): {
                 sym: pd.Series([0.01] * pred_len) for sym in symbols
             }
