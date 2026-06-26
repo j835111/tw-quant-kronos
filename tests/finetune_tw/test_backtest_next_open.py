@@ -368,112 +368,6 @@ def test_compute_atr_weights_missing_sym():
     assert weights["MISSING"] == pytest.approx(1.0 / 101.0)
 
 
-def test_vol_filter_disabled(monkeypatch):
-    import finetune_tw.backtest_next_open as bo
-
-    cfg = Config(
-        db_path="unused.db",
-        lookback_window=3,
-        benchmark_symbol="^TWII",
-        test_start_date="2024-01-01",
-    )
-    rebal_dates = pd.DatetimeIndex(["2024-01-05"])
-    symbols = ["AAA", "BBB", "CCC"]
-    pred_frames = [
-        _make_open_prediction_frame(10.0, [10.2, 10.4], volume=10.0),
-        _make_open_prediction_frame(20.0, [20.5, 20.8], volume=20.0),
-        _make_open_prediction_frame(30.0, [30.9, 31.2], volume=30.0),
-    ]
-    monkeypatch.setattr(bo, "query_symbol", lambda *args, **kwargs: _make_history_frame())
-
-    default_result = bo.compute_raw_signals_open(
-        _FakeBatchPredictor(pred_frames),
-        cfg,
-        rebal_dates,
-        pred_len=3,
-        symbols=symbols,
-    )
-    disabled_result = bo.compute_raw_signals_open(
-        _FakeBatchPredictor(pred_frames),
-        cfg,
-        rebal_dates,
-        pred_len=3,
-        symbols=symbols,
-        vol_filter_pct=0.0,
-    )
-
-    assert default_result.keys() == disabled_result.keys()
-    date_key = "2024-01-05"
-    assert set(default_result[date_key]) == set(disabled_result[date_key]) == set(symbols)
-    for sym in symbols:
-        pd.testing.assert_series_equal(
-            default_result[date_key][sym],
-            disabled_result[date_key][sym],
-        )
-        # pred_frame is not attached when attach_pred_frame=False (default)
-        assert "pred_frame" not in default_result[date_key][sym].attrs
-        assert "pred_frame" not in disabled_result[date_key][sym].attrs
-
-
-def test_vol_filter_removes_low_vol(monkeypatch):
-    import finetune_tw.backtest_next_open as bo
-
-    cfg = Config(
-        db_path="unused.db",
-        lookback_window=3,
-        benchmark_symbol="^TWII",
-        test_start_date="2024-01-01",
-    )
-    rebal_dates = pd.DatetimeIndex(["2024-01-05"])
-    symbols = ["AAA", "BBB", "CCC", "DDD", "EEE"]
-    volumes = [10.0, 20.0, 30.0, 40.0, 50.0]
-    pred_frames = [
-        _make_open_prediction_frame(10.0 + i, [10.5 + i, 11.0 + i], volume=volume)
-        for i, volume in enumerate(volumes)
-    ]
-    monkeypatch.setattr(bo, "query_symbol", lambda *args, **kwargs: _make_history_frame())
-
-    raw_preds = bo.compute_raw_signals_open(
-        _FakeBatchPredictor(pred_frames),
-        cfg,
-        rebal_dates,
-        pred_len=3,
-        symbols=symbols,
-        vol_filter_pct=40.0,
-    )
-
-    assert set(raw_preds["2024-01-05"]) == {"CCC", "DDD", "EEE"}
-
-
-def test_vol_filter_100pct_keeps_nothing(monkeypatch):
-    import finetune_tw.backtest_next_open as bo
-
-    cfg = Config(
-        db_path="unused.db",
-        lookback_window=3,
-        benchmark_symbol="^TWII",
-        test_start_date="2024-01-01",
-    )
-    rebal_dates = pd.DatetimeIndex(["2024-01-05"])
-    symbols = ["AAA", "BBB", "CCC"]
-    pred_frames = [
-        _make_open_prediction_frame(10.0, [10.2], volume=10.0),
-        _make_open_prediction_frame(20.0, [20.4], volume=20.0),
-        _make_open_prediction_frame(30.0, [30.6], volume=30.0),
-    ]
-    monkeypatch.setattr(bo, "query_symbol", lambda *args, **kwargs: _make_history_frame())
-
-    raw_preds = bo.compute_raw_signals_open(
-        _FakeBatchPredictor(pred_frames),
-        cfg,
-        rebal_dates,
-        pred_len=2,
-        symbols=symbols,
-        vol_filter_pct=100.0,
-    )
-
-    assert raw_preds["2024-01-05"] == {}
-
 
 def test_build_portfolio_returns_equal_weight():
     import finetune_tw.backtest_next_open as bo
@@ -545,14 +439,12 @@ def test_run_backtest_next_open_saves_suffix_outputs_and_schema(tmp_path, monkey
         signal_dates,
         pred_len,
         symbols,
-        vol_filter_pct=0.0,
         attach_pred_frame=False,
     ):
         assert seen_cfg is cfg
         assert list(signal_dates.strftime("%Y-%m-%d")) == ["2024-01-02", "2024-01-05"]
         assert pred_len == 3
         assert symbols == ["1101.TW", "1216.TW"]
-        assert vol_filter_pct == pytest.approx(35.0)
         return {
             "2024-01-02": {
                 "1101.TW": pd.Series([0.02, 0.03]),
@@ -566,7 +458,7 @@ def test_run_backtest_next_open_saves_suffix_outputs_and_schema(tmp_path, monkey
 
     monkeypatch.setattr(bo, "compute_raw_signals", fake_compute_raw_signals)
 
-    out_path = bo.run_backtest_next_open(cfg, "round0", [2], vol_filter_pct=35.0)
+    out_path = bo.run_backtest_next_open(cfg, "round0", [2])
 
     assert out_path.name == "backtest_returns_round0_next_open.json"
     assert out_path.exists()
@@ -622,7 +514,7 @@ def test_run_backtest_next_open_passes_atr_weights_when_enabled(tmp_path, monkey
     monkeypatch.setattr(
         bo,
         "compute_raw_signals",
-        lambda predictor, seen_cfg, signal_dates, pred_len, symbols, vol_filter_pct=0.0, attach_pred_frame=False: {
+        lambda predictor, seen_cfg, signal_dates, pred_len, symbols, attach_pred_frame=False: {
             "2024-01-02": {
                 "1101.TW": _make_pred_signal(
                     [0.02, 0.03],
@@ -673,58 +565,6 @@ def test_run_backtest_next_open_passes_atr_weights_when_enabled(tmp_path, monkey
     bo.run_backtest_next_open(cfg, "round0", [2], use_atr_weights=True)
 
 
-def test_main_passes_vol_filter_pct_flag(monkeypatch):
-    import finetune_tw.backtest_next_open as bo
-
-    cfg = Config(
-        db_path="unused.db",
-        benchmark_symbol="^TWII",
-        test_start_date="2024-01-01",
-    )
-    captured: dict[str, object] = {}
-
-    monkeypatch.setattr(bo.Config, "from_yaml", lambda path: cfg)
-    monkeypatch.setattr(
-        bo,
-        "run_backtest_next_open",
-        lambda seen_cfg, model_key, hold_days_list, use_atr_weights=False, vol_filter_pct=0.0: captured.update(
-            {
-                "cfg": seen_cfg,
-                "model_key": model_key,
-                "hold_days_list": hold_days_list,
-                "use_atr_weights": use_atr_weights,
-                "vol_filter_pct": vol_filter_pct,
-            }
-        ),
-    )
-    monkeypatch.setattr(
-        bo.sys,
-        "argv",
-        [
-            "backtest_next_open.py",
-            "--config",
-            "finetune_tw/configs/config_tw_daily.yaml",
-            "--model",
-            "round0",
-            "--hold_days_list",
-            "2",
-            "5",
-            "--vol-filter-pct",
-            "40",
-        ],
-    )
-
-    bo.main()
-
-    assert captured == {
-        "cfg": cfg,
-        "model_key": "round0",
-        "hold_days_list": [2, 5],
-        "use_atr_weights": False,
-        "vol_filter_pct": pytest.approx(40.0),
-    }
-
-
 def test_run_backtest_next_open_uses_exact_variant_schedule_for_non_multiple_holds(
     tmp_path,
     monkeypatch,
@@ -771,14 +611,12 @@ def test_run_backtest_next_open_uses_exact_variant_schedule_for_non_multiple_hol
         signal_dates,
         pred_len,
         symbols,
-        vol_filter_pct=0.0,
         attach_pred_frame=False,
     ):
         assert seen_cfg is cfg
         assert list(signal_dates.strftime("%Y-%m-%d")) == ["2024-01-02", "2024-01-08"]
         assert pred_len == 6
         assert symbols == ["1101.TW", "1216.TW"]
-        assert vol_filter_pct == pytest.approx(0.0)
         return {
             d.strftime("%Y-%m-%d"): {
                 "1101.TW": pd.Series([0.01] * pred_len),
@@ -847,7 +685,7 @@ def test_run_backtest_next_open_raises_when_variant_has_no_realized_daily_return
     monkeypatch.setattr(
         bo,
         "compute_raw_signals",
-        lambda predictor, seen_cfg, signal_dates, pred_len, symbols, vol_filter_pct=0.0, attach_pred_frame=False: {
+        lambda predictor, seen_cfg, signal_dates, pred_len, symbols, attach_pred_frame=False: {
             d.strftime("%Y-%m-%d"): {
                 sym: pd.Series([0.01] * pred_len) for sym in symbols
             }
