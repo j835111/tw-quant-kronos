@@ -39,7 +39,7 @@ pretrained_tokenizer: "NeoQuasar/Kronos-Tokenizer-base"
 pretrained_predictor: "j835111/kronos-tw-finetune"
 hf_revision: "round-0"
 hf_repo: "j835111/kronos-tw-finetune"
-hf_revision_out: "round-1"
+hf_revision_out: "round-3"
 exp_name: "tw_daily"
 output_dir: "/marimo/Kronos/finetune_tw/outputs"
 
