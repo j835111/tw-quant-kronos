@@ -90,6 +90,7 @@ def compute_raw_signals_open(
     rebal_dates: pd.DatetimeIndex,
     pred_len: int,
     symbols: list[str],
+    vol_filter_pct: float = 0.0,
 ) -> dict[str, dict[str, pd.Series]]:
     """Like compute_raw_signals but ranks by predicted open[T+h+1]/open[T+1]-1.
 
@@ -120,6 +121,7 @@ def compute_raw_signals_open(
             batch_yts.append(pd.Series(y_ts))
 
         date_preds: dict[str, pd.Series] = {}
+        date_vols: dict[str, float] = {}
         with torch.no_grad():
             for b in range(0, len(batch_syms), BATCH_SIZE):
                 preds = predictor.predict_batch(
@@ -140,6 +142,23 @@ def compute_raw_signals_open(
                             :, ["high", "low", "close"]
                         ].reset_index(drop=True)
                         date_preds[sym] = returns
+                        date_vols[sym] = float(pred["volume"].iloc[0])
+
+        if vol_filter_pct > 0 and date_vols:
+            vols = np.array(list(date_vols.values()), dtype=float)
+            threshold = np.percentile(vols, vol_filter_pct)
+            before = len(date_preds)
+            if vol_filter_pct >= 100:
+                date_preds = {}
+            else:
+                date_preds = {
+                    sym: signal
+                    for sym, signal in date_preds.items()
+                    if date_vols.get(sym, 0.0) >= threshold
+                }
+            removed = before - len(date_preds)
+            if removed > 0:
+                print(f"  [vol-filter] {rebal_date}: removed {removed} low-vol symbols")
 
         raw_preds[rebal_str] = date_preds
         if (i + 1) % 5 == 0 or i == 0:
@@ -454,6 +473,7 @@ def run_backtest_next_open(
     model_key: str,
     hold_days_list: list[int],
     use_atr_weights: bool = False,
+    vol_filter_pct: float = 0.0,
 ) -> Path:
     specs = build_model_specs(cfg)
     if model_key not in specs:
@@ -503,7 +523,14 @@ def run_backtest_next_open(
     predictor = load_predictor_from_spec(spec, cfg)
     print(f"Inference: {len(signal_dates)} periods × {len(symbols)} symbols")
     sys.stdout.flush()
-    raw_preds = compute_raw_signals(predictor, cfg, signal_dates, pred_len, symbols)
+    raw_preds = compute_raw_signals(
+        predictor,
+        cfg,
+        signal_dates,
+        pred_len,
+        symbols,
+        vol_filter_pct=vol_filter_pct,
+    )
     del predictor
     torch.cuda.empty_cache()
 
@@ -623,6 +650,12 @@ def main() -> None:
         action="store_true",
         help="Use normalized inverse-predicted-ATR weights instead of equal weights",
     )
+    parser.add_argument(
+        "--vol-filter-pct",
+        type=float,
+        default=0.0,
+        help="Filter out symbols below the predicted-volume percentile threshold (0 disables)",
+    )
     args = parser.parse_args()
 
     cfg = Config.from_yaml(args.config)
@@ -638,6 +671,7 @@ def main() -> None:
         args.model,
         args.hold_days_list,
         use_atr_weights=args.atr_weights,
+        vol_filter_pct=args.vol_filter_pct,
     )
 
 
