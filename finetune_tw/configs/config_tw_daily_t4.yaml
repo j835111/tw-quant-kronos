@@ -23,6 +23,7 @@ amp_dtype: "fp16"  # T4 Turing：原生 fp16 TensorCore，GradScaler 自動啟�
 seed: 42
 
 early_stop_patience: 3
+train_steps_per_epoch: 1000
 ic_val_symbols: 500
 ic_val_dates: 40
 ranking_loss_alpha: 0.0
