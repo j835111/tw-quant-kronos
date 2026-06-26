@@ -448,7 +448,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         ic_ir_str = f"{ic_ir_h5:.4f}" if not (ic_ir_h5 != ic_ir_h5) else "nan"
         print(f"  val_loss={val_loss:.4f}  val_ic={val_ic:.4f}  ic_ir_h5={ic_ir_str}")
         with open(log_path, "a") as f:
-            f.write(f"{epoch+1},{global_step},{loss.item():.4f},{val_loss:.4f},{val_ic:.4f},{ic_ir_str}\n")
+            f.write(f"{epoch+1},{global_step},{total_loss.item():.4f},{val_loss:.4f},{val_ic:.4f},{ic_ir_str}\n")
 
         # Use ic_ir_h5 for early stopping; fall back to val_ic if ic_ir_h5 is nan
         stop_metric = ic_ir_h5 if (ic_ir_h5 == ic_ir_h5) else val_ic
