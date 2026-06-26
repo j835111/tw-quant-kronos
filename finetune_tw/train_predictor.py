@@ -417,7 +417,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
             global_step += 1
 
             if global_step % cfg.log_interval == 0:
-                print(f"[epoch {epoch+1} step {global_step}] loss={loss.item():.4f}")
+                print(f"[epoch {epoch+1} step {global_step}] loss={total_loss.item():.4f}")
 
             if global_step % cfg.save_steps == 0:
                 _save_checkpoint(ckpt_dir, global_step, epoch, model, optimizer, scheduler)
