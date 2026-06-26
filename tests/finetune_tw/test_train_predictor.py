@@ -76,13 +76,13 @@ def test_build_ctx_for_date_shapes(tmp_path):
     built = _build_ctx_for_date(cfg, "9999", pd.Timestamp("2024-01-15"))
 
     assert built is not None
-    ctx_df, x_ts, y_ts, last_date, ctx_close = built
+    ctx_df, x_ts, y_ts, last_date, ctx_open = built
     assert len(ctx_df) == 90
     assert list(ctx_df.columns) == ["open", "high", "low", "close", "volume", "amount"]
     assert len(x_ts) == 90
     assert len(y_ts) == cfg.pred_len
     assert last_date == x_ts.iloc[-1]
-    assert ctx_close == ctx_df["close"].iloc[-1]
+    assert ctx_open == ctx_df["open"].iloc[-1]
 
 
 def test_build_ctx_for_date_insufficient_returns_none(tmp_path):

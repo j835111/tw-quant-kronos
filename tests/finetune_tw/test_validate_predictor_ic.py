@@ -17,20 +17,20 @@ def test_validate_predictor_ic_perfect_skill_returns_high_ic():
         "D": [100, 99.5, 99, 98.5, 98],
     }
     order = ["A", "B", "C", "D"]
-    ctx_close = 100.0
+    ctx_open = 100.0
 
     def build_ctx(sym, date):
         df = pd.DataFrame({"open": [100.0]*3, "high": [100.0]*3, "low": [100.0]*3,
-                           "close": [100.0, 100.0, ctx_close], "volume": [1.0]*3, "amount": [1.0]*3})
+                           "close": [100.0, 100.0, 100.0], "volume": [1.0]*3, "amount": [1.0]*3})
         return (df, pd.Series(pd.bdate_range("2024-01-01", periods=3)),
-                pd.Series(pd.bdate_range(date, periods=5)), pd.Timestamp(date), ctx_close)
+                pd.Series(pd.bdate_range(date, periods=5)), pd.Timestamp(date), ctx_open)
 
     def predict_batch(df_list, x_timestamp_list, y_timestamp_list, pred_len, _order=order, _ap=actual_paths):
         # df_list arrives in the order validate_predictor_ic enumerates val_universe
         res = []
         for i in range(len(df_list)):
             sym = _order[i % len(_order)]
-            res.append(pd.DataFrame({"close": _ap[sym][:pred_len]}))
+            res.append(pd.DataFrame({"open": _ap[sym][:pred_len], "close": _ap[sym][:pred_len]}))
         return res
 
     def actual_lookup(sym, ctx_last_date, n):
@@ -47,17 +47,17 @@ def test_validate_predictor_ic_uses_val_ic_horizons_for_prediction_guard():
         val_ic_horizons = 3
 
     class _FakePrediction:
-        def __init__(self, closes, reported_len):
-            self._close = pd.Series(closes, dtype=float)
+        def __init__(self, opens, reported_len):
+            self._open = pd.Series(opens, dtype=float)
             self._reported_len = reported_len
 
         def __len__(self):
             return self._reported_len
 
         def __getitem__(self, key):
-            if key != "close":
+            if key != "open":
                 raise KeyError(key)
-            return self._close
+            return self._open
 
     actual_paths = {
         "A": [101, 102, 103, 104, 105],
@@ -66,13 +66,13 @@ def test_validate_predictor_ic_uses_val_ic_horizons_for_prediction_guard():
         "D": [100, 99.5, 99, 98.5, 98],
     }
     order = ["A", "B", "C", "D"]
-    ctx_close = 100.0
+    ctx_open = 100.0
 
     def build_ctx(sym, date):
         df = pd.DataFrame({"open": [100.0]*3, "high": [100.0]*3, "low": [100.0]*3,
-                           "close": [100.0, 100.0, ctx_close], "volume": [1.0]*3, "amount": [1.0]*3})
+                           "close": [100.0, 100.0, 100.0], "volume": [1.0]*3, "amount": [1.0]*3})
         return (df, pd.Series(pd.bdate_range("2024-01-01", periods=3)),
-                pd.Series(pd.bdate_range(date, periods=5)), pd.Timestamp(date), ctx_close)
+                pd.Series(pd.bdate_range(date, periods=5)), pd.Timestamp(date), ctx_open)
 
     def predict_batch(df_list, x_timestamp_list, y_timestamp_list, pred_len, _order=order, _ap=actual_paths):
         res = []

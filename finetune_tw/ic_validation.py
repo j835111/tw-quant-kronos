@@ -80,16 +80,17 @@ class EarlyStopper:
 
 
 def _collect_rows_for_date(predict_batch_fn, val_universe, date, cfg, build_ctx_fn, batch_size=64):
-    """Return list of (sym, pred_close_arr, ctx_close, last_date) for one val date."""
-    syms, dfs, x_timestamps, y_timestamps, last_dates, ctx_closes = [], [], [], [], [], []
+    """Return list of (sym, pred_open_arr, pred_open_t1, last_date) for one val date."""
+    required_pred_len = min(getattr(cfg, "val_ic_horizons", cfg.pred_len), cfg.pred_len - 1) + 1
+    syms, dfs, x_timestamps, y_timestamps, last_dates = [], [], [], [], []
     for sym in val_universe:
         built = build_ctx_fn(sym, date)
         if built is None:
             continue
-        ctx_df, x_ts, y_ts, last_date, ctx_close = built
+        ctx_df, x_ts, y_ts, last_date, _ctx_ref = built
         syms.append(sym); dfs.append(ctx_df)
         x_timestamps.append(x_ts); y_timestamps.append(y_ts)
-        last_dates.append(last_date); ctx_closes.append(ctx_close)
+        last_dates.append(last_date)
 
     rows = []
     for start in range(0, len(syms), batch_size):
@@ -97,11 +98,13 @@ def _collect_rows_for_date(predict_batch_fn, val_universe, date, cfg, build_ctx_
         preds = predict_batch_fn(dfs[start:stop], x_timestamps[start:stop],
                                  y_timestamps[start:stop], cfg.pred_len)
         for offset, pred in enumerate(preds):
-            if pred is None or len(pred) < getattr(cfg, "val_ic_horizons", cfg.pred_len):
+            if pred is None:
+                continue
+            pred_open = pred["open"].values.astype(float)
+            if len(pred_open) < required_pred_len:
                 continue
             i = start + offset
-            rows.append((syms[i], pred["close"].values.astype(float),
-                          float(ctx_closes[i]), last_dates[i]))
+            rows.append((syms[i], pred_open, float(pred["open"].iloc[0]), last_dates[i]))
     return rows
 
 
@@ -114,19 +117,22 @@ def validate_predictor_ic(
     build_ctx_fn,
     batch_size=64,
 ) -> float:
-    """Mean cross-sectional rank IC over h1..cfg.val_ic_horizons on a val subset."""
-    horizons = min(cfg.val_ic_horizons, cfg.pred_len)
+    """Mean cross-sectional rank IC over open-to-open returns on a val subset."""
+    horizons = min(cfg.val_ic_horizons, cfg.pred_len - 1)
     per_group = {}
     for date in val_dates:
         rows = _collect_rows_for_date(predict_batch_fn, val_universe, date, cfg, build_ctx_fn, batch_size)
         for horizon in range(horizons):
             pred_returns, actual_returns = [], []
-            for sym, pred_close, ctx_close, last_date in rows:
-                actual_close = np.asarray(actual_lookup(sym, last_date, cfg.pred_len), dtype=float)
-                if len(actual_close) <= horizon:
+            for sym, pred_open, pred_open_t1, last_date in rows:
+                actual_open = np.asarray(actual_lookup(sym, last_date, cfg.pred_len), dtype=float)
+                if len(actual_open) <= horizon + 1:
                     continue
-                pred_returns.append(pred_close[horizon] / ctx_close - 1.0)
-                actual_returns.append(actual_close[horizon] / ctx_close - 1.0)
+                actual_open_t1 = actual_open[0]
+                if pred_open_t1 <= 0 or actual_open_t1 <= 0:
+                    continue
+                pred_returns.append(pred_open[horizon + 1] / pred_open_t1 - 1.0)
+                actual_returns.append(actual_open[horizon + 1] / actual_open_t1 - 1.0)
             if len(pred_returns) >= 3:
                 per_group[(pd.Timestamp(date), horizon + 1)] = (pred_returns, actual_returns)
     return mean_cross_sectional_ic(per_group)
@@ -147,17 +153,23 @@ def validate_predictor_ic_ir(
     More noise-robust than IC mean: rewards consistent signal over single-day spikes.
     Returns nan if fewer than 3 finite IC values are available.
     """
-    h = min(target_horizon, cfg.pred_len) - 1  # 0-indexed
+    max_horizon = min(target_horizon, cfg.pred_len - 1)
+    if max_horizon <= 0:
+        return float("nan")
+    h = max_horizon - 1  # 0-indexed
     per_date_ic: list[float] = []
     for date in val_dates:
         rows = _collect_rows_for_date(predict_batch_fn, val_universe, date, cfg, build_ctx_fn, batch_size)
         pred_returns, actual_returns = [], []
-        for sym, pred_close, ctx_close, last_date in rows:
-            actual_close = np.asarray(actual_lookup(sym, last_date, cfg.pred_len), dtype=float)
-            if len(actual_close) <= h:
+        for sym, pred_open, pred_open_t1, last_date in rows:
+            actual_open = np.asarray(actual_lookup(sym, last_date, cfg.pred_len), dtype=float)
+            if len(actual_open) <= h + 1:
                 continue
-            pred_returns.append(pred_close[h] / ctx_close - 1.0)
-            actual_returns.append(actual_close[h] / ctx_close - 1.0)
+            actual_open_t1 = actual_open[0]
+            if pred_open_t1 <= 0 or actual_open_t1 <= 0:
+                continue
+            pred_returns.append(pred_open[h + 1] / pred_open_t1 - 1.0)
+            actual_returns.append(actual_open[h + 1] / actual_open_t1 - 1.0)
         ic = rank_ic(pred_returns, actual_returns)
         if np.isfinite(ic):
             per_date_ic.append(ic)

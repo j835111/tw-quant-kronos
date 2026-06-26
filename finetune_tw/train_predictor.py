@@ -186,10 +186,10 @@ def _build_ctx_for_date(cfg, sym, rebal_date):
         return None
     x_ts = pd.to_datetime(ctx["date"]).reset_index(drop=True)
     y_ts = pd.Series(pd.date_range(rebal_date, periods=cfg.pred_len, freq="B"))
-    return ctx_df, x_ts, y_ts, x_ts.iloc[-1], float(ctx_df["close"].iloc[-1])
+    return ctx_df, x_ts, y_ts, x_ts.iloc[-1], float(ctx_df["open"].iloc[-1])
 
 
-def _actual_close_lookup(cfg, cache, sym, ctx_last_date, n):
+def _actual_open_lookup(cfg, cache, sym, ctx_last_date, n):
     ser = cache.get(sym)
     if ser is None:
         return np.array([], dtype=float)
@@ -331,7 +331,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
     val_universe = pick_val_universe(all_syms, cfg.ic_val_symbols, cfg.seed)
     val_dates = pick_val_dates(cfg.train_end_date, cfg.val_end_date, cfg.ic_val_dates)
     buffer_start = (pd.Timestamp(cfg.train_end_date) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
-    actual_cache = {}
+    actual_open_cache = {}
     for sym in val_universe:
         df = query_symbol(
             cfg.db_path,
@@ -340,7 +340,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
             end=(pd.Timestamp(cfg.val_end_date) + pd.Timedelta(days=cfg.pred_len * 3)).strftime("%Y-%m-%d"),
         )
         if len(df):
-            actual_cache[sym] = pd.Series(df["close"].values, index=pd.DatetimeIndex(df["date"]))
+            actual_open_cache[sym] = pd.Series(df["open"].values, index=pd.DatetimeIndex(df["date"]))
     stopper = EarlyStopper(patience=cfg.early_stop_patience, mode="max")
 
     for epoch in range(start_epoch, cfg.basemodel_epochs):
@@ -409,7 +409,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         )
         model.eval()
         predict_fn = _make_predict_batch_fn(predictor)
-        actual_fn = lambda sym, last, n: _actual_close_lookup(cfg, actual_cache, sym, last, n)
+        actual_fn = lambda sym, last, n: _actual_open_lookup(cfg, actual_open_cache, sym, last, n)
         ctx_fn = lambda sym, rebal_date: _build_ctx_for_date(cfg, sym, rebal_date)
 
         val_ic = validate_predictor_ic(predict_fn, actual_fn, val_universe, val_dates, cfg, ctx_fn)
