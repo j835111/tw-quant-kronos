@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,25 +58,64 @@ def build_portfolio_returns(
     price_data: dict[str, pd.Series],
     holdings_sequence: list[set[str]],
     rebalance_dates: pd.Index,
+    weights: dict | None = None,
 ) -> tuple[pd.Series, pd.Series]:
+    def resolve_period_weights(rebalance_date) -> dict[str, float] | None:
+        if not weights:
+            return None
+        sample = next(iter(weights.values()), None)
+        if isinstance(sample, Mapping):
+            date_key = pd.Timestamp(rebalance_date)
+            period_weights = weights.get(date_key)
+            if period_weights is None:
+                period_weights = weights.get(date_key.strftime("%Y-%m-%d"))
+            return dict(period_weights) if period_weights else None
+        return dict(weights)
+
     all_daily: list[pd.Series] = []
     period_rets: list[float] = []
     period_dates: list = []
     for i in range(len(rebalance_dates) - 1):
         date, next_date = rebalance_dates[i], rebalance_dates[i + 1]
+        period_weights = resolve_period_weights(date)
         daily_sym_series = []
-        sym_period_rets: list[float] = []
+        sym_period_rets: dict[str, float] = {}
         for sym in holdings_sequence[i]:
             if sym not in price_data:
                 continue
             series = price_data[sym]
             sub = series[(series.index >= date) & (series.index <= next_date)]
             if len(sub) >= 2:
-                daily_sym_series.append(sub.pct_change().dropna())
-                sym_period_rets.append(float(sub.iloc[-1] / sub.iloc[0] - 1.0))
+                daily_sym_series.append(sub.pct_change().dropna().rename(sym))
+                sym_period_rets[sym] = float(sub.iloc[-1] / sub.iloc[0] - 1.0)
         if daily_sym_series:
-            all_daily.append(pd.concat(daily_sym_series, axis=1).mean(axis=1))
-        period_rets.append(float(np.mean(sym_period_rets)) if sym_period_rets else 0.0)
+            daily_frame = pd.concat(daily_sym_series, axis=1)
+            if period_weights is None:
+                all_daily.append(daily_frame.mean(axis=1))
+            else:
+                weight_series = pd.Series(
+                    {sym: float(period_weights.get(sym, 0.0)) for sym in daily_frame.columns},
+                    dtype=float,
+                )
+                denom = daily_frame.notna().mul(weight_series, axis=1).sum(axis=1)
+                numer = daily_frame.mul(weight_series, axis=1).sum(axis=1, min_count=1)
+                weighted_daily = numer[denom > 0] / denom[denom > 0]
+                all_daily.append(weighted_daily)
+        if sym_period_rets:
+            if period_weights is None:
+                period_rets.append(float(np.mean(list(sym_period_rets.values()))))
+            else:
+                total_weight = float(sum(period_weights.get(sym, 0.0) for sym in sym_period_rets))
+                if total_weight > 0:
+                    weighted_ret = sum(
+                        sym_period_rets[sym] * float(period_weights.get(sym, 0.0))
+                        for sym in sym_period_rets
+                    ) / total_weight
+                    period_rets.append(float(weighted_ret))
+                else:
+                    period_rets.append(0.0)
+        else:
+            period_rets.append(0.0)
         period_dates.append(date)
 
     period_returns = pd.Series(period_rets, index=pd.DatetimeIndex(period_dates))
