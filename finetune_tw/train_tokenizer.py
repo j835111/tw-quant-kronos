@@ -116,7 +116,8 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-    save_dir = Path(cfg.output_dir) / cfg.exp_name / "tokenizer"
+    exp_dir = Path(cfg.output_dir) / cfg.exp_name
+    save_dir = exp_dir / "tokenizer"
     ckpt_dir = save_dir / "checkpoints"
     remote_root = f"gdrive:Kronos/outputs/{cfg.exp_name}/tokenizer"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -160,7 +161,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
     )
     start_epoch, global_step = _restore_tokenizer_training_state(
         cfg,
-        exp_dir=save_dir,
+        exp_dir=exp_dir,
         ckpt_dir=ckpt_dir,
         remote_root=remote_root,
         model=tokenizer,
