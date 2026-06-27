@@ -41,6 +41,7 @@
 2. `/mnt/first` 狀態缺失時，可從 HF branch 拉回最新 checkpoint 再 resume
 3. HF 上傳失敗時，訓練**不中斷**，僅記錄 warning
 4. `/marimo/Kronos` 即使被清空，只需重 clone code，不影響訓練 state 恢復
+5. sandbox / session 重開後，可透過單一腳本重建 code checkout、接回 state、並重新啟動訓練與監控
 
 ## 設計原則
 
@@ -55,6 +56,9 @@
    - 避免 checkpoint branch 無限制膨脹
 4. **上傳失敗不影響訓練**
    - HF 只是 backup，不成為單點失敗
+5. **恢復操作可一鍵執行**
+   - 不把人工多步驟 shell 操作當成正式恢復流程
+   - 需要有可重複、可審查的 bootstrap script
 
 ## 目錄佈局
 
@@ -137,6 +141,96 @@
 1. 先讀本地 `/mnt/first/.../tokenizer/checkpoints`
 2. 本地沒有時，從 HF `tokenizer/checkpoints/` 拉回
 3. 都沒有時，從 `cfg.pretrained_tokenizer` 起訓
+
+## 一鍵恢復腳本
+
+除了訓練程式本身的 restore 邏輯，還需要一個**session / sandbox 重開後的 bootstrap script**。沒有這個元件，恢復流程仍然依賴人工重新 clone、手動檢查 config、手動啟訓，實務上仍然脆弱。
+
+### 腳本位置
+
+- `scripts/resume_molab_training.sh`
+
+### 目標
+
+在新的或被半重置的 MoLab sandbox 中，透過一條命令完成：
+
+1. 重建 `/marimo/Kronos` code checkout
+2. 驗證 `/mnt/first/kronos_state` 是否存在
+3. 驗證 config 指向 `/mnt/first/kronos_state`
+4. 本地找 checkpoint，必要時 fallback HF
+5. 啟動或 resume tokenizer / predictor 訓練
+6. 重啟訓練監控腳本
+
+### 腳本介面
+
+最小介面：
+
+- `scripts/resume_molab_training.sh --config finetune_tw/configs/config_tw_daily_rtx6000.yaml --stage predictor`
+
+可選參數：
+
+- `--stage tokenizer|predictor`
+- `--repo-url <git remote>`
+- `--repo-dir /marimo/Kronos`
+- `--state-dir /mnt/first/kronos_state`
+- `--branch <git branch>`
+
+預設行為：
+
+- `repo-dir=/marimo/Kronos`
+- `state-dir=/mnt/first/kronos_state`
+- `stage=predictor`
+
+### 腳本職責
+
+#### 1. Code checkout bootstrap
+
+- 若 `/marimo/Kronos` 不存在：重新 clone
+- 若 `/marimo/Kronos` 存在但不是有效 git repo：刪除後重 clone
+- 若存在有效 repo：切到指定 branch，必要時 `fetch` / `reset --hard` 到指定 revision
+
+注意：因為 `/marimo/Kronos` 被明確視為 disposable code checkout，所以腳本可以主動重建這棵目錄；這不適用於 `/mnt/first/kronos_state`
+
+#### 2. State preflight
+
+- 檢查 `/mnt/first/kronos_state` 是否存在
+- 若不存在：
+  - 建立目錄骨架
+  - 記錄「本地 state 缺失，將依賴 HF restore 或重新訓練」
+- 檢查 `db_path` 與 `output_dir` 是否落在 `state-dir` 之下
+- 若 config 仍指向 `/marimo/Kronos/...`，直接報錯退出，不啟動訓練
+
+#### 3. Restore preflight
+
+- tokenizer stage：
+  - 檢查本地 tokenizer checkpoint
+  - 若無，本地 tokenizer best_model 是否存在
+  - 若仍無，之後交由程式內 HF restore / pretrained 路徑處理
+- predictor stage：
+  - 檢查本地 predictor checkpoint
+  - 若無，再檢查 tokenizer best_model 是否存在
+  - 若 tokenizer best_model 也無，優先嘗試從 HF restore tokenizer，再啟動 predictor
+
+#### 4. Launch
+
+- 使用 `python -m finetune_tw.train_tokenizer --config ...` 或
+  `python -m finetune_tw.train_predictor --config ...`
+- 以 background process 啟動，stdout / stderr 導到 state-dir 下的 log
+- 將 pid 寫到 `state-dir` 對應位置，而不是寫在 `/marimo/Kronos`
+
+#### 5. Monitoring
+
+- 腳本需一併重啟 monitor process
+- monitor 讀取 `train_log.csv`、`week23_train_stdout.log`、`checkpoints/`
+- monitor 輸出也寫到 `state-dir`
+
+### 腳本失敗策略
+
+- code clone 失敗：直接 exit，因為無法啟動訓練
+- config 指錯路徑：直接 exit，因為這是危險配置
+- 本地 state 缺失：允許繼續，但須明確記 log
+- HF restore 失敗：允許繼續，交由訓練程式決定是否從較早狀態或 pretrained 起跑
+- monitor 啟動失敗：訓練可繼續，但需回傳非零或明確 warning，避免誤以為監控存在
 
 ## 保存流程
 
@@ -221,6 +315,22 @@ MoLab 專用 config（如 `config_tw_daily_rtx6000.yaml`）改成：
 - 與 predictor 對齊
 - 不再讓 tokenizer 與 predictor 的恢復策略分叉
 
+### `scripts/resume_molab_training.sh`
+
+新增腳本：
+
+- 重建 `/marimo/Kronos`
+- 驗證 state-dir 與 config
+- 啟動 tokenizer / predictor
+- 重啟 monitor
+
+要求：
+
+- 可重複執行（idempotent）
+- 對「repo 消失但 state 仍在」情況穩定
+- 不把 state 寫回 `/marimo/Kronos`
+- log 輸出應足夠支持人工除錯
+
 ## 驗證策略
 
 ### 單元測試
@@ -237,6 +347,8 @@ MoLab 專用 config（如 `config_tw_daily_rtx6000.yaml`）改成：
    - upload / prune 拋錯時只記錄，不中止訓練
 5. **tokenizer / predictor 一致**
    - 兩條訓練路徑都會走同樣的 HF checkpoint 備援
+6. **bootstrap script**
+   - repo 不存在、repo 損壞、state 存在、state 缺失等情況下，腳本都做出可預期行為
 
 ### 手動驗證
 
@@ -248,12 +360,17 @@ MoLab 專用 config（如 `config_tw_daily_rtx6000.yaml`）改成：
 2. **遠端恢復**
    - 暫時移走本地 checkpoint 目錄
    - 確認程式能從 HF `checkpoints-round-3` 拉回最新 checkpoint
+3. **一鍵恢復**
+   - 手動刪除 `/marimo/Kronos`
+   - 保留 `/mnt/first/kronos_state`
+   - 執行 `scripts/resume_molab_training.sh`
+   - 確認 code checkout 被重建、訓練恢復、monitor 重啟
 
 ## 不在範圍（YAGNI）
 
 - 不在這一輪改動訓練策略、loss、backtest 邏輯
 - 不在這一輪引入新的雲端儲存（S3 / GCS / HF buckets）
-- 不在這一輪處理 `.git` workspace 恢復；code checkout 直接重 clone 即可
+- 不在這一輪保留 `/marimo/Kronos` 的任何訓練狀態；該目錄明確視為 disposable
 
 ## 風險
 
@@ -274,4 +391,5 @@ MoLab 專用 config（如 `config_tw_daily_rtx6000.yaml`）改成：
 - `finetune_tw/train_predictor.py`
 - `finetune_tw/train_tokenizer.py`
 - `finetune_tw/configs/config_tw_daily_rtx6000.yaml`
+- `scripts/resume_molab_training.sh`
 - 對應單元測試檔
