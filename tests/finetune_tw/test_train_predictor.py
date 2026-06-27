@@ -119,7 +119,8 @@ def test_predictor_steps_for_epoch_uses_cap():
 
 
 def test_restore_predictor_training_state_prefers_local_checkpoint(tmp_path, monkeypatch):
-    ckpt_dir = tmp_path / "predictor" / "checkpoints"
+    exp_dir = tmp_path
+    ckpt_dir = exp_dir / "predictor" / "checkpoints"
     ckpt_dir.mkdir(parents=True)
     (ckpt_dir / "ckpt-10.pt").write_bytes(b"x")
     calls = []
@@ -142,7 +143,7 @@ def test_restore_predictor_training_state_prefers_local_checkpoint(tmp_path, mon
     cfg = Config()
     state = _restore_predictor_training_state(
         cfg,
-        save_dir=tmp_path / "predictor",
+        exp_dir=exp_dir,
         ckpt_dir=ckpt_dir,
         remote_root="gdrive:Kronos/outputs/test/predictor",
         model=object(),
@@ -158,8 +159,8 @@ def test_restore_predictor_training_state_prefers_local_checkpoint(tmp_path, mon
 
 
 def test_restore_predictor_training_state_uses_hf_when_local_missing(tmp_path, monkeypatch):
-    save_dir = tmp_path / "predictor"
-    ckpt_dir = save_dir / "checkpoints"
+    exp_dir = tmp_path
+    ckpt_dir = exp_dir / "predictor" / "checkpoints"
     calls = []
 
     def fake_gdrive_restore(path, remote):
@@ -167,6 +168,9 @@ def test_restore_predictor_training_state_uses_hf_when_local_missing(tmp_path, m
 
     def fake_hf_restore(exp_dir, repo_id, subfolder, revision):
         calls.append(("hf", exp_dir, repo_id, subfolder, revision))
+        target = exp_dir / subfolder
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "ckpt-20.pt").write_bytes(b"x")
         return 1
 
     def fake_load(path, model, optimizer, scheduler):
@@ -180,7 +184,7 @@ def test_restore_predictor_training_state_uses_hf_when_local_missing(tmp_path, m
     cfg = Config(hf_repo="org/repo", hf_checkpoint_revision_out="checkpoints-round-3")
     state = _restore_predictor_training_state(
         cfg,
-        save_dir=save_dir,
+        exp_dir=exp_dir,
         ckpt_dir=ckpt_dir,
         remote_root="gdrive:Kronos/outputs/test/predictor",
         model=object(),
@@ -191,7 +195,50 @@ def test_restore_predictor_training_state_uses_hf_when_local_missing(tmp_path, m
     assert state == (4, 20)
     assert calls == [
         ("gdrive", ckpt_dir, "gdrive:Kronos/outputs/test/predictor/checkpoints"),
-        ("hf", save_dir, "org/repo", "predictor/checkpoints", "checkpoints-round-3"),
+        ("hf", exp_dir, "org/repo", "predictor/checkpoints", "checkpoints-round-3"),
+        ("load", ckpt_dir),
+    ]
+    assert (ckpt_dir / "ckpt-20.pt").exists()
+
+
+def test_restore_predictor_training_state_ignores_invalid_local_checkpoint_entries(tmp_path, monkeypatch):
+    exp_dir = tmp_path
+    ckpt_dir = exp_dir / "predictor" / "checkpoints"
+    ckpt_dir.mkdir(parents=True)
+    (ckpt_dir / "ckpt-10.pt").write_bytes(b"")
+    (ckpt_dir / "ckpt-latest.pt").write_bytes(b"x")
+    calls = []
+
+    def fake_gdrive_restore(path, remote):
+        calls.append(("gdrive", path, remote))
+
+    def fake_hf_restore(exp_dir, repo_id, subfolder, revision):
+        calls.append(("hf", exp_dir, repo_id, subfolder, revision))
+        return 1
+
+    def fake_load(path, model, optimizer, scheduler):
+        calls.append(("load", path))
+        return 5, 30
+
+    monkeypatch.setattr("finetune_tw.train_predictor._gdrive_restore_checkpoints", fake_gdrive_restore)
+    monkeypatch.setattr("finetune_tw.train_predictor.restore_checkpoints", fake_hf_restore)
+    monkeypatch.setattr("finetune_tw.train_predictor._load_latest_checkpoint", fake_load)
+
+    cfg = Config(hf_repo="org/repo", hf_checkpoint_revision_out="checkpoints-round-3")
+    state = _restore_predictor_training_state(
+        cfg,
+        exp_dir=exp_dir,
+        ckpt_dir=ckpt_dir,
+        remote_root="gdrive:Kronos/outputs/test/predictor",
+        model=object(),
+        optimizer=object(),
+        scheduler=object(),
+    )
+
+    assert state == (5, 30)
+    assert calls == [
+        ("gdrive", ckpt_dir, "gdrive:Kronos/outputs/test/predictor/checkpoints"),
+        ("hf", exp_dir, "org/repo", "predictor/checkpoints", "checkpoints-round-3"),
         ("load", ckpt_dir),
     ]
 

@@ -28,6 +28,7 @@ from finetune_tw.ic_validation import (
     validate_predictor_ic_ir,
 )
 from finetune_tw.hf_utils import (
+    local_checkpoints,
     push_best_model,
     push_checkpoint,
     push_file,
@@ -86,7 +87,7 @@ def _gdrive_sync_checkpoint(ckpt_path: Path, remote_ckpt_dir: str) -> None:
 
 def _restore_predictor_training_state(
     cfg: Config,
-    save_dir: Path,
+    exp_dir: Path,
     ckpt_dir: Path,
     remote_root: str,
     model,
@@ -95,12 +96,12 @@ def _restore_predictor_training_state(
 ):
     _gdrive_restore_checkpoints(ckpt_dir, f"{remote_root}/checkpoints")
     if (
-        not list(ckpt_dir.glob("ckpt-*.pt"))
+        not local_checkpoints(ckpt_dir)
         and cfg.hf_repo
         and cfg.hf_checkpoint_revision_out
     ):
         restore_checkpoints(
-            save_dir,
+            exp_dir,
             cfg.hf_repo,
             "predictor/checkpoints",
             cfg.hf_checkpoint_revision_out,
@@ -317,7 +318,8 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
     amp_enabled = amp_enabled and device.type == "cuda"
     scaler = GradScaler() if (amp_enabled and amp_dtype == torch.float16) else None
 
-    save_dir = Path(cfg.output_dir) / cfg.exp_name / "predictor"
+    exp_dir = Path(cfg.output_dir) / cfg.exp_name
+    save_dir = exp_dir / "predictor"
     ckpt_dir = save_dir / "checkpoints"
     remote_root = f"gdrive:Kronos/outputs/{cfg.exp_name}/predictor"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -392,7 +394,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
     )
     start_epoch, global_step = _restore_predictor_training_state(
         cfg,
-        save_dir=save_dir,
+        exp_dir=exp_dir,
         ckpt_dir=ckpt_dir,
         remote_root=remote_root,
         model=model,
