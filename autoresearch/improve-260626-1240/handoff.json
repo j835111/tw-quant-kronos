@@ -1,0 +1,100 @@
+{
+  "version": "2.1.0",
+  "source": "improve",
+  "timestamp": "2026-06-26T12:40:00",
+  "status": "BOUNDED",
+  "results_tsv": "autoresearch/improve-260626-1240/research-findings.md",
+  "config": {
+    "goal": "改進 Kronos 台股預測模型（Round 0）",
+    "icp": "台股量化動能策略研究者，open-to-open 執行",
+    "depth": "standard",
+    "categories_explored": ["ICP challenges", "Competitor gaps", "Market trends", "UX & experience", "Revenue & growth"],
+    "insights_total": 11,
+    "prds_generated": 0
+  },
+  "findings": [
+    {
+      "id": "M1",
+      "tier": "must-have",
+      "confidence": "HIGH",
+      "title": "ATR position sizing（用預測 high-low 做波動加權）",
+      "impact": "MaxDD 35% → 20%",
+      "requires_retraining": false,
+      "files": ["finetune_tw/backtest_next_open.py"],
+      "effort": "small",
+      "prd_path": null
+    },
+    {
+      "id": "M2",
+      "tier": "must-have",
+      "confidence": "HIGH",
+      "title": "Open-to-open IC early stopping（對齊訓練目標）",
+      "impact": "Sharpe 1.356 → 1.5+",
+      "requires_retraining": true,
+      "files": ["finetune_tw/ic_validation.py", "finetune_tw/train_predictor.py"],
+      "effort": "medium",
+      "prd_path": null
+    },
+    {
+      "id": "M3",
+      "tier": "must-have",
+      "confidence": "MEDIUM",
+      "title": "Volume confidence filter（排除低流動性持倉）",
+      "impact": "選股品質改善，MaxDD 小幅降低",
+      "requires_retraining": false,
+      "files": ["finetune_tw/backtest_next_open.py"],
+      "effort": "small",
+      "prd_path": null
+    },
+    {
+      "id": "N1",
+      "tier": "nice-to-have",
+      "confidence": "HIGH",
+      "title": "Auxiliary ranking loss（pairwise/listwise IC loss）",
+      "impact": "IC 0.04 → 0.06+，Sharpe 1.5 → 1.6+",
+      "requires_retraining": true,
+      "files": ["finetune_tw/train_predictor.py"],
+      "effort": "large",
+      "prd_path": null
+    },
+    {
+      "id": "N2",
+      "tier": "nice-to-have",
+      "confidence": "MEDIUM",
+      "title": "擴大 IC 驗證集（500 symbols × 40 dates）",
+      "impact": "Early stop 更穩定",
+      "requires_retraining": true,
+      "files": ["finetune_tw/configs/config_tw_daily_rtx6000.yaml"],
+      "effort": "small",
+      "prd_path": null
+    },
+    {
+      "id": "N3",
+      "tier": "nice-to-have",
+      "confidence": "HIGH",
+      "title": "Label horizon scan（Label Horizon Paradox approach）",
+      "impact": "找到最優 proxy label horizon",
+      "requires_retraining": true,
+      "files": ["finetune_tw/train_predictor.py", "finetune_tw/configs/"],
+      "effort": "large",
+      "prd_path": null
+    },
+    {
+      "id": "S1",
+      "tier": "moonshot",
+      "confidence": "MEDIUM",
+      "title": "Price-space MSE auxiliary loss（橋接離散 token 與連續回歸）",
+      "impact": "改善預測精度，接近 TimesFM 水準",
+      "requires_retraining": true,
+      "files": ["finetune_tw/train_predictor.py", "model/kronos.py"],
+      "effort": "very-large",
+      "prd_path": null
+    }
+  ],
+  "key_papers": [
+    {"title": "The Label Horizon Paradox", "url": "https://arxiv.org/abs/2602.03395", "venue": "ICML 2026", "relevance": "直接解釋我們的訓練/部署目標不對齊問題"},
+    {"title": "On Evaluating Loss Functions for Stock Ranking", "url": "https://arxiv.org/abs/2510.14156", "venue": "CIKM 2025", "relevance": "ranking loss > CE loss for stock selection"},
+    {"title": "MiM-StocR: Momentum-integrated Multi-task", "url": "https://arxiv.org/abs/2509.10461", "relevance": "ApproxNDCG listwise + MTL SOTA on CSI"},
+    {"title": "Do Better Volatility Forecasts Lead to Better Portfolios?", "url": "https://arxiv.org/abs/2605.19278", "relevance": "predicted volatility → better portfolio construction"}
+  ]
+}

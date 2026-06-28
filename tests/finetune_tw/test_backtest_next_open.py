@@ -10,6 +10,73 @@ from finetune_tw.db import init_db, upsert_prices
 import pytest
 
 
+def _make_pred_signal(
+    returns: list[float],
+    high: list[float],
+    low: list[float],
+    close: list[float],
+) -> pd.Series:
+    signal = pd.Series(returns, dtype=float)
+    signal.attrs["pred_frame"] = pd.DataFrame(
+        {"high": high, "low": low, "close": close},
+        dtype=float,
+    )
+    return signal
+
+
+def _make_history_frame() -> pd.DataFrame:
+    dates = pd.bdate_range("2024-01-01", periods=3)
+    return pd.DataFrame(
+        {
+            "date": dates.strftime("%Y-%m-%d"),
+            "open": [10.0, 10.5, 11.0],
+            "high": [10.2, 10.7, 11.2],
+            "low": [9.8, 10.3, 10.8],
+            "close": [10.1, 10.6, 11.1],
+            "volume": [100.0, 110.0, 120.0],
+            "amount": [1_010.0, 1_166.0, 1_332.0],
+        }
+    )
+
+
+def _make_open_prediction_frame(
+    base_open: float,
+    future_opens: list[float],
+    volume: float,
+) -> pd.DataFrame:
+    opens = [base_open, *future_opens]
+    return pd.DataFrame(
+        {
+            "open": opens,
+            "high": [price + 0.5 for price in opens],
+            "low": [price - 0.5 for price in opens],
+            "close": opens,
+            "volume": [volume] * len(opens),
+        },
+        dtype=float,
+    )
+
+
+class _FakeBatchPredictor:
+    def __init__(self, preds: list[pd.DataFrame]):
+        self._preds = preds
+        self._cursor = 0
+
+    def predict_batch(
+        self,
+        df_list,
+        x_timestamp_list,
+        y_timestamp_list,
+        pred_len,
+        **kwargs,
+    ):
+        batch_size = len(df_list)
+        start = self._cursor
+        end = start + batch_size
+        self._cursor = end
+        return self._preds[start:end]
+
+
 def _seed_calendar_db(tmp_path) -> str:
     db_path = str(tmp_path / "calendar.db")
     init_db(db_path)
@@ -258,6 +325,90 @@ def test_build_next_open_portfolio_returns_returns_empty_series_for_zero_executi
     assert daily_returns.empty
 
 
+def test_compute_atr_weights_basic():
+    import finetune_tw.backtest_next_open as bo
+
+    raw_preds = {
+        "LOW": _make_pred_signal([0.01, 0.02], high=[10.1, 10.1], low=[9.9, 9.9], close=[10.0, 10.0]),
+        "MID": _make_pred_signal([0.01, 0.02], high=[10.2, 10.3], low=[9.8, 9.7], close=[10.0, 10.0]),
+        "HIGH": _make_pred_signal([0.01, 0.02], high=[10.4, 10.6], low=[9.6, 9.4], close=[10.0, 10.0]),
+    }
+
+    weights = bo.compute_atr_weights(raw_preds, hold_days=2, selected_syms=["LOW", "MID", "HIGH"])
+
+    assert sum(weights.values()) == pytest.approx(1.0)
+    assert weights["LOW"] > weights["MID"] > weights["HIGH"]
+
+
+def test_compute_atr_weights_min_atr_clamp():
+    import finetune_tw.backtest_next_open as bo
+
+    raw_preds = {
+        "CLAMPED": _make_pred_signal([0.01], high=[10.0], low=[10.0], close=[10.0]),
+        "WIDE": _make_pred_signal([0.01], high=[10.03], low=[9.97], close=[10.0]),
+    }
+
+    weights = bo.compute_atr_weights(raw_preds, hold_days=1, selected_syms=["CLAMPED", "WIDE"])
+
+    assert weights["CLAMPED"] == pytest.approx(2.0 / 3.0)
+    assert weights["WIDE"] == pytest.approx(1.0 / 3.0)
+
+
+def test_compute_atr_weights_missing_sym():
+    import finetune_tw.backtest_next_open as bo
+
+    raw_preds = {
+        "KNOWN": _make_pred_signal([0.01], high=[10.05], low=[9.95], close=[10.0]),
+    }
+
+    weights = bo.compute_atr_weights(raw_preds, hold_days=1, selected_syms=["KNOWN", "MISSING"])
+
+    assert sum(weights.values()) == pytest.approx(1.0)
+    assert weights["KNOWN"] == pytest.approx(100.0 / 101.0)
+    assert weights["MISSING"] == pytest.approx(1.0 / 101.0)
+
+
+
+def test_build_portfolio_returns_equal_weight():
+    import finetune_tw.backtest_next_open as bo
+
+    dates = pd.bdate_range("2024-01-01", periods=2)
+    price_data = {
+        "A": pd.Series([100.0, 110.0], index=dates),
+        "B": pd.Series([200.0, 180.0], index=dates),
+    }
+
+    period_returns, daily_returns = bo.build_portfolio_returns(
+        price_data,
+        [{"A", "B"}],
+        dates,
+        weights=None,
+    )
+
+    assert period_returns.iloc[0] == pytest.approx(0.0)
+    assert daily_returns.iloc[0] == pytest.approx(0.0)
+
+
+def test_build_portfolio_returns_custom_weights():
+    import finetune_tw.backtest_next_open as bo
+
+    dates = pd.bdate_range("2024-01-01", periods=2)
+    price_data = {
+        "A": pd.Series([100.0, 110.0], index=dates),
+        "B": pd.Series([200.0, 180.0], index=dates),
+    }
+
+    period_returns, daily_returns = bo.build_portfolio_returns(
+        price_data,
+        [{"A", "B"}],
+        dates,
+        weights={"A": 0.75, "B": 0.25},
+    )
+
+    assert period_returns.iloc[0] == pytest.approx(0.05)
+    assert daily_returns.iloc[0] == pytest.approx(0.05)
+
+
 def test_run_backtest_next_open_saves_suffix_outputs_and_schema(tmp_path, monkeypatch):
     import finetune_tw.backtest_next_open as bo
 
@@ -282,10 +433,17 @@ def test_run_backtest_next_open_saves_suffix_outputs_and_schema(tmp_path, monkey
     monkeypatch.setattr(bo, "load_predictor_from_spec", lambda spec, _cfg: object())
     monkeypatch.setattr(bo, "_today", lambda: pd.Timestamp("2024-01-09"))
 
-    def fake_compute_raw_signals(predictor, seen_cfg, signal_dates, pred_len, symbols):
+    def fake_compute_raw_signals(
+        predictor,
+        seen_cfg,
+        signal_dates,
+        pred_len,
+        symbols,
+        attach_pred_frame=False,
+    ):
         assert seen_cfg is cfg
         assert list(signal_dates.strftime("%Y-%m-%d")) == ["2024-01-02", "2024-01-05"]
-        assert pred_len == 2
+        assert pred_len == 3
         assert symbols == ["1101.TW", "1216.TW"]
         return {
             "2024-01-02": {
@@ -318,6 +476,93 @@ def test_run_backtest_next_open_saves_suffix_outputs_and_schema(tmp_path, monkey
     }
     variant = data["hold_variants"]["2"]
     assert len(variant["dates"]) == len(variant["daily_returns"])
+
+
+def test_run_backtest_next_open_passes_atr_weights_when_enabled(tmp_path, monkeypatch):
+    import finetune_tw.backtest_next_open as bo
+
+    db_path = _seed_runner_db(tmp_path)
+    cfg = Config(
+        db_path=db_path,
+        benchmark_symbol="^TWII",
+        test_start_date="2024-01-01",
+        output_dir=str(tmp_path / "outputs"),
+        exp_name="next_open_case_atr",
+        top_k=2,
+        min_signal_threshold=0.0,
+    )
+
+    monkeypatch.setattr(
+        bo,
+        "build_model_specs",
+        lambda _cfg: {
+            "round0": SimpleNamespace(label="Round 0"),
+        },
+    )
+    monkeypatch.setattr(bo, "load_predictor_from_spec", lambda spec, _cfg: object())
+    monkeypatch.setattr(bo, "_today", lambda: pd.Timestamp("2024-01-09"))
+    monkeypatch.setattr(
+        bo,
+        "compute_metrics",
+        lambda dr: {"annualised_return": 0.0, "sharpe": 0.0, "max_drawdown": 0.0},
+    )
+    monkeypatch.setattr(
+        bo,
+        "plot_backtest_next_open_results",
+        lambda data, out_dir: out_dir / "backtest_round0_next_open.png",
+    )
+    monkeypatch.setattr(
+        bo,
+        "compute_raw_signals",
+        lambda predictor, seen_cfg, signal_dates, pred_len, symbols, attach_pred_frame=False: {
+            "2024-01-02": {
+                "1101.TW": _make_pred_signal(
+                    [0.02, 0.03],
+                    high=[10.1, 10.1],
+                    low=[9.9, 9.9],
+                    close=[10.0, 10.0],
+                ),
+                "1216.TW": _make_pred_signal(
+                    [0.01, 0.015],
+                    high=[20.4, 20.6],
+                    low=[19.6, 19.4],
+                    close=[20.0, 20.0],
+                ),
+            },
+        },
+    )
+    monkeypatch.setattr(
+        bo,
+        "signals_to_holdings",
+        lambda raw_preds, signal_dates, hold_days, top_k, threshold: [
+            {"1101.TW", "1216.TW"} for _ in signal_dates
+        ],
+    )
+
+    def fake_build_next_open_portfolio_returns(
+        price_frames,
+        holdings_sequence,
+        execution_dates,
+        trading_dates,
+        weights=None,
+    ):
+        assert list(execution_dates.strftime("%Y-%m-%d")) == ["2024-01-03", "2024-01-08"]
+        assert weights is not None
+        first_weights = weights["2024-01-03"]
+        assert sum(first_weights.values()) == pytest.approx(1.0)
+        assert first_weights["1101.TW"] > first_weights["1216.TW"]
+        second_weights = weights["2024-01-08"]
+        assert second_weights == pytest.approx({"1101.TW": 0.5, "1216.TW": 0.5})
+        daily = pd.Series([0.0], index=pd.DatetimeIndex([execution_dates[0]]))
+        return pd.Series(dtype=float), daily
+
+    monkeypatch.setattr(
+        bo,
+        "build_next_open_portfolio_returns",
+        fake_build_next_open_portfolio_returns,
+    )
+
+    bo.run_backtest_next_open(cfg, "round0", [2], use_atr_weights=True)
 
 
 def test_run_backtest_next_open_uses_exact_variant_schedule_for_non_multiple_holds(
@@ -360,10 +605,17 @@ def test_run_backtest_next_open_uses_exact_variant_schedule_for_non_multiple_hol
     seen_signal_dates = {}
     seen_execution_dates = {}
 
-    def fake_compute_raw_signals(predictor, seen_cfg, signal_dates, pred_len, symbols):
+    def fake_compute_raw_signals(
+        predictor,
+        seen_cfg,
+        signal_dates,
+        pred_len,
+        symbols,
+        attach_pred_frame=False,
+    ):
         assert seen_cfg is cfg
         assert list(signal_dates.strftime("%Y-%m-%d")) == ["2024-01-02", "2024-01-08"]
-        assert pred_len == 5
+        assert pred_len == 6
         assert symbols == ["1101.TW", "1216.TW"]
         return {
             d.strftime("%Y-%m-%d"): {
@@ -433,7 +685,7 @@ def test_run_backtest_next_open_raises_when_variant_has_no_realized_daily_return
     monkeypatch.setattr(
         bo,
         "compute_raw_signals",
-        lambda predictor, seen_cfg, signal_dates, pred_len, symbols: {
+        lambda predictor, seen_cfg, signal_dates, pred_len, symbols, attach_pred_frame=False: {
             d.strftime("%Y-%m-%d"): {
                 sym: pd.Series([0.01] * pred_len) for sym in symbols
             }

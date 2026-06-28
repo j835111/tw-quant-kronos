@@ -12,6 +12,12 @@
       "sourceType": "github",
       "skillPath": "skills/retro-marimo-pair/SKILL.md",
       "computedHash": "1f89f0999518297d5a0928528c87fc082da9645cac554b0101049042ec661d7b"
+    },
+    "runpodctl": {
+      "source": "runpod/skills",
+      "sourceType": "github",
+      "skillPath": "runpodctl/SKILL.md",
+      "computedHash": "1a9b6033b13915fc75bc66c77b3ff14e6633b267d5ca8056bff8c3509efbfc06"
     }
   }
 }

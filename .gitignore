@@ -81,3 +81,9 @@ finetune_tw/outputs/
 !finetune_tw/outputs/tw_daily/stacking_features_oof*.parquet
 !finetune_tw/outputs/tw_daily/stacking_model*.lgb
 .worktrees/
+
+# Local agent / Claude Code skill caches
+.agents/
+.claude/skills/
+.tmp_pytest/
+assets/

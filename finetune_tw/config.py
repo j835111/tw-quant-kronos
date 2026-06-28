@@ -39,6 +39,8 @@ class Config:
     ic_val_symbols: int = 150
     ic_val_dates: int = 8
     val_ic_horizons: int = 5
+    ranking_loss_alpha: float = 0.0
+    ranking_loss_horizon: int = 5
 
     # Model paths
     pretrained_tokenizer: str = "NeoQuasar/Kronos-Tokenizer-base"
@@ -50,6 +52,8 @@ class Config:
     hf_repo: str = ""           # e.g. "j835111/kronos-tw-finetune"
     hf_revision: str = ""       # revision to load pretrained_predictor from HF
     hf_revision_out: str = ""   # revision to push best_model to HF after training
+    hf_checkpoint_revision_out: str = ""
+    hf_checkpoint_keep_last_n: int = 3
 
     # Backtest
     top_k: int = 20

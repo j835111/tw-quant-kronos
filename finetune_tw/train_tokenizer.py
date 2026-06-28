@@ -14,6 +14,13 @@ from torch.utils.data import DataLoader
 from model import KronosTokenizer
 from finetune_tw.config import Config
 from finetune_tw.dataset import MultiStockDataset
+from finetune_tw.hf_utils import (
+    local_checkpoints,
+    push_best_model,
+    push_checkpoint,
+    restore_checkpoints,
+    wait_for_pushes,
+)
 
 
 def _gdrive_sync(local_dir: Path, remote: str = "gdrive:Kronos/outputs") -> None:
@@ -52,6 +59,42 @@ def _gdrive_sync_checkpoint(ckpt_path: Path, remote_ckpt_dir: str) -> None:
     )
 
 
+def _restore_tokenizer_training_state(
+    cfg: Config,
+    exp_dir: Path,
+    ckpt_dir: Path,
+    remote_root: str,
+    model,
+    optimizer,
+    scheduler,
+):
+    _gdrive_restore_checkpoints(ckpt_dir, f"{remote_root}/checkpoints")
+    if (
+        not local_checkpoints(ckpt_dir)
+        and cfg.hf_repo
+        and cfg.hf_checkpoint_revision_out
+    ):
+        restore_checkpoints(
+            exp_dir,
+            cfg.hf_repo,
+            "tokenizer/checkpoints",
+            cfg.hf_checkpoint_revision_out,
+        )
+    return _load_latest_checkpoint(ckpt_dir, model, optimizer, scheduler)
+
+
+def _backup_tokenizer_checkpoint(cfg: Config, ckpt_path: Path, remote_root: str) -> None:
+    _gdrive_sync_checkpoint(ckpt_path, f"{remote_root}/checkpoints")
+    if cfg.hf_repo and cfg.hf_checkpoint_revision_out:
+        push_checkpoint(
+            ckpt_path,
+            cfg.hf_repo,
+            f"tokenizer/checkpoints/{ckpt_path.name}",
+            cfg.hf_checkpoint_revision_out,
+            cfg.hf_checkpoint_keep_last_n,
+        )
+
+
 def _resolve_runtime_flags(amp_dtype: str, enable_tf32: bool) -> dict[str, object]:
     if amp_dtype == "bf16":
         dtype = torch.bfloat16
@@ -79,7 +122,8 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-    save_dir = Path(cfg.output_dir) / cfg.exp_name / "tokenizer"
+    exp_dir = Path(cfg.output_dir) / cfg.exp_name
+    save_dir = exp_dir / "tokenizer"
     ckpt_dir = save_dir / "checkpoints"
     remote_root = f"gdrive:Kronos/outputs/{cfg.exp_name}/tokenizer"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -121,9 +165,15 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         steps_per_epoch=train_steps_per_epoch, epochs=cfg.tokenizer_epochs,
         pct_start=0.03, div_factor=10,
     )
-    # Resume from latest checkpoint
-    _gdrive_restore_checkpoints(ckpt_dir, f"{remote_root}/checkpoints")
-    start_epoch, global_step = _load_latest_checkpoint(ckpt_dir, tokenizer, optimizer, scheduler)
+    start_epoch, global_step = _restore_tokenizer_training_state(
+        cfg,
+        exp_dir=exp_dir,
+        ckpt_dir=ckpt_dir,
+        remote_root=remote_root,
+        model=tokenizer,
+        optimizer=optimizer,
+        scheduler=scheduler,
+    )
     best_val_loss = float("inf")
     log_path = save_dir / "train_log.csv"
     if not log_path.exists():
@@ -156,7 +206,11 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
 
             if global_step % cfg.save_steps == 0:
                 _save_checkpoint(ckpt_dir, global_step, epoch, tokenizer, optimizer, scheduler)
-                _gdrive_sync_checkpoint(ckpt_dir / f"ckpt-{global_step}.pt", f"{remote_root}/checkpoints")
+                _backup_tokenizer_checkpoint(
+                    cfg,
+                    ckpt_path=ckpt_dir / f"ckpt-{global_step}.pt",
+                    remote_root=remote_root,
+                )
 
             if max_steps > 0 and global_step >= max_steps:
                 return
@@ -170,6 +224,13 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
             tokenizer.save_pretrained(str(save_dir / "best_model"))
             print(f"  -> new best val_loss={val_loss:.4f}, saved.")
             _gdrive_sync(save_dir / "best_model", remote=remote_root)
+            if cfg.hf_repo and cfg.hf_revision_out:
+                push_best_model(
+                    save_dir / "best_model",
+                    cfg.hf_repo,
+                    "tokenizer/best_model",
+                    cfg.hf_revision_out,
+                )
 
 
 def _validate(
@@ -209,16 +270,20 @@ def _save_checkpoint(ckpt_dir: Path, step: int, epoch: int, model, optimizer, sc
 
 
 def _load_latest_checkpoint(ckpt_dir: Path, model, optimizer, scheduler):
-    ckpts = sorted(ckpt_dir.glob("ckpt-*.pt"),
-                   key=lambda p: int(p.stem.split("-")[1]))
+    ckpts = local_checkpoints(ckpt_dir)
     if not ckpts:
         return 0, 0
-    state = torch.load(ckpts[-1], map_location="cpu", weights_only=True)
-    model.load_state_dict(state["model"])
-    optimizer.load_state_dict(state["optimizer"])
-    scheduler.load_state_dict(state["scheduler"])
-    print(f"Resumed from {ckpts[-1].name} (step {state['step']})")
-    return state.get("epoch", 0), state["step"]
+    for ckpt in reversed(ckpts):
+        try:
+            state = torch.load(ckpt, map_location="cpu", weights_only=True)
+            model.load_state_dict(state["model"])
+            optimizer.load_state_dict(state["optimizer"])
+            scheduler.load_state_dict(state["scheduler"])
+            print(f"Resumed from {ckpt.name} (step {state['step']})")
+            return state.get("epoch", 0), state["step"]
+        except Exception as exc:
+            print(f"Skipping checkpoint {ckpt.name}: {exc}")
+    return 0, 0
 
 
 def main() -> None:
@@ -226,6 +291,7 @@ def main() -> None:
     parser.add_argument("--config", default="finetune_tw/configs/config_tw_daily.yaml")
     cfg = Config.from_yaml(parser.parse_args().config)
     run_training(cfg)
+    wait_for_pushes()
 
 
 if __name__ == "__main__":

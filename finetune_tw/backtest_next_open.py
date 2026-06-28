@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import matplotlib
@@ -16,6 +17,7 @@ import torch
 
 from finetune_tw.backtest import (
     build_model_specs,
+    build_portfolio_returns,
     compute_metrics,
     load_predictor_from_spec,
     rank_stocks,
@@ -88,6 +90,7 @@ def compute_raw_signals_open(
     rebal_dates: pd.DatetimeIndex,
     pred_len: int,
     symbols: list[str],
+    attach_pred_frame: bool = False,
 ) -> dict[str, dict[str, pd.Series]]:
     """Like compute_raw_signals but ranks by predicted open[T+h+1]/open[T+1]-1.
 
@@ -131,9 +134,14 @@ def compute_raw_signals_open(
                     if pred is not None and len(pred) >= pred_len:
                         pred_opens = pred["open"].reset_index(drop=True)
                         # iloc[h-1] = open[T+h+1] / open[T+1] - 1
-                        date_preds[sym] = (
+                        returns = (
                             pred_opens.iloc[1:].reset_index(drop=True) / pred_opens.iloc[0] - 1
                         )
+                        if attach_pred_frame:
+                            returns.attrs["pred_frame"] = pred.loc[
+                                :, ["high", "low", "close"]
+                            ].reset_index(drop=True)
+                        date_preds[sym] = returns
 
         raw_preds[rebal_str] = date_preds
         if (i + 1) % 5 == 0 or i == 0:
@@ -143,6 +151,55 @@ def compute_raw_signals_open(
     return raw_preds
 
 
+compute_raw_signals = compute_raw_signals_open
+
+
+def _predicted_atr_from_series(
+    pred_returns: pd.Series | None,
+    hold_days: int,
+    min_atr: float,
+) -> float | None:
+    if pred_returns is None:
+        return None
+    pred_frame = pred_returns.attrs.get("pred_frame")
+    if not isinstance(pred_frame, pd.DataFrame) or pred_frame.empty:
+        return None
+    if not {"high", "low", "close"}.issubset(pred_frame.columns):
+        return None
+
+    h = min(max(hold_days - 1, 0), len(pred_frame) - 1)
+    high = float(pred_frame["high"].iloc[h])
+    low = float(pred_frame["low"].iloc[h])
+    close = float(pred_frame["close"].iloc[h])
+    if not np.isfinite(high) or not np.isfinite(low) or not np.isfinite(close):
+        return None
+    if close <= 0:
+        return min_atr
+    return float(max((high - low) / close, min_atr))
+
+
+def compute_atr_weights(
+    raw_preds: dict[str, pd.Series] | None,
+    hold_days: int,
+    selected_syms: list[str],
+    min_atr: float = 0.003,
+) -> dict[str, float]:
+    if not selected_syms:
+        return {}
+
+    date_preds = raw_preds or {}
+    weights: dict[str, float] = {}
+    for sym in selected_syms:
+        pred_atr = _predicted_atr_from_series(date_preds.get(sym), hold_days, min_atr)
+        weights[sym] = 1.0 / pred_atr if pred_atr is not None else 1.0
+
+    total = float(sum(weights.values()))
+    if total <= 0:
+        equal_weight = 1.0 / len(selected_syms)
+        return {sym: equal_weight for sym in selected_syms}
+    return {sym: weight / total for sym, weight in weights.items()}
+
+
 def _mean_symbol_return(
     price_frames: dict[str, pd.DataFrame],
     symbols: set[str],
@@ -150,8 +207,11 @@ def _mean_symbol_return(
     numerator_col: str,
     denominator_date: pd.Timestamp,
     denominator_col: str,
+    weights: dict[str, float] | None = None,
 ) -> float | None:
     values: list[float] = []
+    weighted_values: list[float] = []
+    valid_weights: list[float] = []
     for sym in symbols:
         frame = price_frames.get(sym)
         if frame is None:
@@ -162,10 +222,39 @@ def _mean_symbol_return(
         if den == 0.0:
             continue
         num = float(frame.loc[numerator_date, numerator_col])
-        values.append(num / den - 1.0)
-    if not values:
+        ret = num / den - 1.0
+        if weights is None:
+            values.append(ret)
+            continue
+        weight = float(weights.get(sym, 0.0))
+        if weight <= 0:
+            continue
+        weighted_values.append(ret * weight)
+        valid_weights.append(weight)
+    if weights is None:
+        if not values:
+            return None
+        return float(np.mean(values))
+    total_weight = float(sum(valid_weights))
+    if total_weight <= 0:
         return None
-    return float(np.mean(values))
+    return float(sum(weighted_values) / total_weight)
+
+
+def _resolve_period_weights(
+    weights: dict | None,
+    period_date: pd.Timestamp,
+) -> dict[str, float] | None:
+    if not weights:
+        return None
+    sample = next(iter(weights.values()), None)
+    if isinstance(sample, Mapping):
+        date_key = pd.Timestamp(period_date)
+        period_weights = weights.get(date_key)
+        if period_weights is None:
+            period_weights = weights.get(date_key.strftime("%Y-%m-%d"))
+        return dict(period_weights) if period_weights else None
+    return dict(weights)
 
 
 def build_next_open_portfolio_returns(
@@ -173,6 +262,7 @@ def build_next_open_portfolio_returns(
     holdings_sequence: list[set[str]],
     execution_dates: pd.DatetimeIndex,
     trading_dates: pd.DatetimeIndex,
+    weights: dict | None = None,
 ) -> tuple[pd.Series, pd.Series]:
     if len(holdings_sequence) != len(execution_dates):
         raise ValueError(
@@ -186,6 +276,7 @@ def build_next_open_portfolio_returns(
     period_values: list[float] = []
     period_index: list[pd.Timestamp] = []
 
+    first_weights = _resolve_period_weights(weights, execution_dates[0])
     first_intraday = _mean_symbol_return(
         price_frames,
         holdings_sequence[0],
@@ -193,6 +284,7 @@ def build_next_open_portfolio_returns(
         "close",
         execution_dates[0],
         "open",
+        weights=first_weights,
     )
     if first_intraday is not None:
         daily_values.append(first_intraday)
@@ -203,6 +295,8 @@ def build_next_open_portfolio_returns(
         next_exec = execution_dates[i + 1]
         current_holdings = holdings_sequence[i]
         next_holdings = holdings_sequence[i + 1]
+        current_weights = _resolve_period_weights(weights, current_exec)
+        next_weights = _resolve_period_weights(weights, next_exec)
 
         interior_dates = trading_dates[
             (trading_dates > current_exec) & (trading_dates < next_exec)
@@ -216,6 +310,7 @@ def build_next_open_portfolio_returns(
                 "close",
                 prev_date,
                 "close",
+                weights=current_weights,
             )
             if close_to_close is not None:
                 daily_values.append(close_to_close)
@@ -229,6 +324,7 @@ def build_next_open_portfolio_returns(
             "open",
             prev_date,
             "close",
+            weights=current_weights,
         )
         intraday = _mean_symbol_return(
             price_frames,
@@ -237,6 +333,7 @@ def build_next_open_portfolio_returns(
             "close",
             next_exec,
             "open",
+            weights=next_weights,
         )
         if gap is not None and intraday is not None:
             daily_values.append((1.0 + gap) * (1.0 + intraday) - 1.0)
@@ -249,6 +346,7 @@ def build_next_open_portfolio_returns(
             "open",
             current_exec,
             "open",
+            weights=current_weights,
         )
         period_values.append(period_return if period_return is not None else 0.0)
         period_index.append(current_exec)
@@ -353,7 +451,12 @@ def plot_backtest_next_open_results(data: dict, out_dir: Path) -> Path:
     return out_path
 
 
-def run_backtest_next_open(cfg: Config, model_key: str, hold_days_list: list[int]) -> Path:
+def run_backtest_next_open(
+    cfg: Config,
+    model_key: str,
+    hold_days_list: list[int],
+    use_atr_weights: bool = False,
+) -> Path:
     specs = build_model_specs(cfg)
     if model_key not in specs:
         raise ValueError(f"Unknown model '{model_key}'. Choose from: {list(specs)}")
@@ -367,7 +470,10 @@ def run_backtest_next_open(cfg: Config, model_key: str, hold_days_list: list[int
 
     print(f"\n{'=' * 60}")
     print(f"Model:  {spec.label}")
-    print(f"Hold variants: {hold_days_list}  |  pred_len={pred_len}  (open-to-open signal)")
+    print(
+        f"Hold variants: {hold_days_list}  |  pred_len={pred_len}  "
+        f"(open-to-open signal, weights={'ATR' if use_atr_weights else 'equal'})"
+    )
     print(f"Period: {cfg.test_start_date} → {test_end}")
     print(f"{'=' * 60}")
     sys.stdout.flush()
@@ -399,7 +505,14 @@ def run_backtest_next_open(cfg: Config, model_key: str, hold_days_list: list[int
     predictor = load_predictor_from_spec(spec, cfg)
     print(f"Inference: {len(signal_dates)} periods × {len(symbols)} symbols")
     sys.stdout.flush()
-    raw_preds = compute_raw_signals_open(predictor, cfg, signal_dates, pred_len, symbols)
+    raw_preds = compute_raw_signals(
+        predictor,
+        cfg,
+        signal_dates,
+        pred_len,
+        symbols,
+        attach_pred_frame=use_atr_weights,
+    )
     del predictor
     torch.cuda.empty_cache()
 
@@ -413,12 +526,41 @@ def run_backtest_next_open(cfg: Config, model_key: str, hold_days_list: list[int
             cfg.top_k,
             cfg.min_signal_threshold,
         )
-        _, daily_returns = build_next_open_portfolio_returns(
-            price_frames=price_frames,
-            holdings_sequence=holdings,
-            execution_dates=variant_execution_dates,
-            trading_dates=trading_dates,
-        )
+        period_weights: dict[str, dict[str, float]] | None = None
+        if use_atr_weights:
+            period_weights = {}
+            atr_samples: list[float] = []
+            for signal_date, execution_date, selected_syms in zip(
+                variant_signal_dates,
+                variant_execution_dates,
+                holdings,
+            ):
+                selected_list = sorted(selected_syms)
+                date_preds = raw_preds.get(signal_date.strftime("%Y-%m-%d"), {})
+                period_weights[execution_date.strftime("%Y-%m-%d")] = compute_atr_weights(
+                    date_preds,
+                    hd,
+                    selected_list,
+                )
+                for sym in selected_list:
+                    pred_atr = _predicted_atr_from_series(date_preds.get(sym), hd, 0.003)
+                    if pred_atr is not None:
+                        atr_samples.append(pred_atr)
+            if atr_samples:
+                print(
+                    f"  hold={hd}d ATR stats — min:{min(atr_samples):.4f}  "
+                    f"mean:{float(np.mean(atr_samples)):.4f}  max:{max(atr_samples):.4f}"
+                )
+                sys.stdout.flush()
+        build_kwargs = {
+            "price_frames": price_frames,
+            "holdings_sequence": holdings,
+            "execution_dates": variant_execution_dates,
+            "trading_dates": trading_dates,
+        }
+        if period_weights is not None:
+            build_kwargs["weights"] = period_weights
+        _, daily_returns = build_next_open_portfolio_returns(**build_kwargs)
         if daily_returns.empty:
             raise ValueError(
                 f"No realized daily returns for hold_days={hd}. "
@@ -467,7 +609,7 @@ def main() -> None:
     parser.add_argument(
         "--model",
         required=True,
-        choices=["pretrained", "round0", "round1", "round2"],
+        choices=["pretrained", "round0", "round1", "round2", "round3"],
         help="Which model weights to load",
     )
     parser.add_argument(
@@ -485,6 +627,11 @@ def main() -> None:
         default=None,
         help="Min predicted return to include a stock (default: config value)",
     )
+    parser.add_argument(
+        "--atr-weights",
+        action="store_true",
+        help="Use normalized inverse-predicted-ATR weights instead of equal weights",
+    )
     args = parser.parse_args()
 
     cfg = Config.from_yaml(args.config)
@@ -495,7 +642,12 @@ def main() -> None:
     if args.threshold is not None:
         cfg.min_signal_threshold = args.threshold
 
-    run_backtest_next_open(cfg, args.model, args.hold_days_list)
+    run_backtest_next_open(
+        cfg,
+        args.model,
+        args.hold_days_list,
+        use_atr_weights=args.atr_weights,
+    )
 
 
 if __name__ == "__main__":

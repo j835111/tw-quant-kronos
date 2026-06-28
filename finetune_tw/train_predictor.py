@@ -27,7 +27,15 @@ from finetune_tw.ic_validation import (
     validate_predictor_ic,
     validate_predictor_ic_ir,
 )
-from finetune_tw.hf_utils import push_best_model, push_file, wait_for_pushes
+from finetune_tw.hf_utils import (
+    local_checkpoints,
+    push_best_model,
+    push_checkpoint,
+    push_file,
+    restore_best_model,
+    restore_checkpoints,
+    wait_for_pushes,
+)
 from finetune_tw.train_tokenizer import _load_latest_checkpoint, _save_checkpoint
 
 
@@ -78,6 +86,42 @@ def _gdrive_sync_checkpoint(ckpt_path: Path, remote_ckpt_dir: str) -> None:
     )
 
 
+def _restore_predictor_training_state(
+    cfg: Config,
+    exp_dir: Path,
+    ckpt_dir: Path,
+    remote_root: str,
+    model,
+    optimizer,
+    scheduler,
+):
+    _gdrive_restore_checkpoints(ckpt_dir, f"{remote_root}/checkpoints")
+    if (
+        not local_checkpoints(ckpt_dir)
+        and cfg.hf_repo
+        and cfg.hf_checkpoint_revision_out
+    ):
+        restore_checkpoints(
+            exp_dir,
+            cfg.hf_repo,
+            "predictor/checkpoints",
+            cfg.hf_checkpoint_revision_out,
+        )
+    return _load_latest_checkpoint(ckpt_dir, model, optimizer, scheduler)
+
+
+def _backup_predictor_checkpoint(cfg: Config, ckpt_path: Path, remote_root: str) -> None:
+    _gdrive_sync_checkpoint(ckpt_path, f"{remote_root}/checkpoints")
+    if cfg.hf_repo and cfg.hf_checkpoint_revision_out:
+        push_checkpoint(
+            ckpt_path,
+            cfg.hf_repo,
+            f"predictor/checkpoints/{ckpt_path.name}",
+            cfg.hf_checkpoint_revision_out,
+            cfg.hf_checkpoint_keep_last_n,
+        )
+
+
 def _resolve_amp(amp_dtype: str) -> tuple[bool, "torch.dtype | None"]:
     """Map config amp_dtype to (autocast_enabled, dtype). Supports bf16 and fp16."""
     if amp_dtype == "bf16":
@@ -85,6 +129,34 @@ def _resolve_amp(amp_dtype: str) -> tuple[bool, "torch.dtype | None"]:
     if amp_dtype == "fp16":
         return True, torch.float16
     return False, None
+
+
+def differentiable_rank_ic_loss(
+    pred_scores: torch.Tensor,
+    actual_scores: torch.Tensor,
+) -> torch.Tensor:
+    if pred_scores.numel() < 2 or actual_scores.numel() < 2:
+        return pred_scores.new_tensor(0.0)
+
+    pred = pred_scores.reshape(-1).to(torch.float32)
+    actual = actual_scores.reshape(-1).to(torch.float32)
+    z_pred = (pred - pred.mean()) / (pred.std(unbiased=False) + 1e-8)
+    z_actual = (actual - actual.mean()) / (actual.std(unbiased=False) + 1e-8)
+    return -(z_pred * z_actual).mean()
+
+
+def _combine_training_loss(
+    token_loss: torch.Tensor,
+    ranking_loss_alpha: float,
+    ranking_loss: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if ranking_loss_alpha > 0:
+        if ranking_loss is None:
+            ranking_loss = token_loss.new_tensor(0.0)
+        else:
+            ranking_loss = ranking_loss.to(device=token_loss.device, dtype=token_loss.dtype)
+        return token_loss + ranking_loss_alpha * ranking_loss
+    return token_loss
 
 
 class CachedTokenDataset(Dataset):
@@ -186,10 +258,10 @@ def _build_ctx_for_date(cfg, sym, rebal_date):
         return None
     x_ts = pd.to_datetime(ctx["date"]).reset_index(drop=True)
     y_ts = pd.Series(pd.date_range(rebal_date, periods=cfg.pred_len, freq="B"))
-    return ctx_df, x_ts, y_ts, x_ts.iloc[-1], float(ctx_df["close"].iloc[-1])
+    return ctx_df, x_ts, y_ts, x_ts.iloc[-1], float(ctx_df["open"].iloc[-1])
 
 
-def _actual_close_lookup(cfg, cache, sym, ctx_last_date, n):
+def _actual_open_lookup(cfg, cache, sym, ctx_last_date, n):
     ser = cache.get(sym)
     if ser is None:
         return np.array([], dtype=float)
@@ -215,14 +287,29 @@ def _make_predict_batch_fn(predictor):
     return fn
 
 
+def _ensure_tokenizer_best_model(cfg: Config, exp_dir: Path) -> Path:
+    tok_path = exp_dir / "tokenizer" / "best_model"
+    if tok_path.exists():
+        return tok_path
+    if cfg.hf_repo and cfg.hf_revision_out:
+        restore_best_model(
+            exp_dir,
+            cfg.hf_repo,
+            "tokenizer/best_model",
+            cfg.hf_revision_out,
+        )
+    if not tok_path.exists():
+        raise FileNotFoundError(f"Tokenizer not found at {tok_path}. Run train_tokenizer.py first.")
+    return tok_path
+
+
 def run_training(cfg: Config, max_steps: int = -1) -> None:
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
     _configure_cuda_runtime(device, cfg.enable_tf32)
 
-    tok_path = Path(cfg.output_dir) / cfg.exp_name / "tokenizer" / "best_model"
-    if not tok_path.exists():
-        raise FileNotFoundError(f"Tokenizer not found at {tok_path}. Run train_tokenizer.py first.")
+    exp_dir = Path(cfg.output_dir) / cfg.exp_name
+    tok_path = _ensure_tokenizer_best_model(cfg, exp_dir)
 
     tokenizer = KronosTokenizer.from_pretrained(str(tok_path)).to(device)
     tokenizer.eval()
@@ -247,7 +334,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
     amp_enabled = amp_enabled and device.type == "cuda"
     scaler = GradScaler() if (amp_enabled and amp_dtype == torch.float16) else None
 
-    save_dir = Path(cfg.output_dir) / cfg.exp_name / "predictor"
+    save_dir = exp_dir / "predictor"
     ckpt_dir = save_dir / "checkpoints"
     remote_root = f"gdrive:Kronos/outputs/{cfg.exp_name}/predictor"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -320,8 +407,15 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         steps_per_epoch=train_steps_per_epoch, epochs=cfg.basemodel_epochs,
         pct_start=0.03, div_factor=10,
     )
-    _gdrive_restore_checkpoints(ckpt_dir, f"{remote_root}/checkpoints")
-    start_epoch, global_step = _load_latest_checkpoint(ckpt_dir, model, optimizer, scheduler)
+    start_epoch, global_step = _restore_predictor_training_state(
+        cfg,
+        exp_dir=exp_dir,
+        ckpt_dir=ckpt_dir,
+        remote_root=remote_root,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+    )
     log_path = save_dir / "train_log.csv"
     if not log_path.exists():
         log_path.write_text("epoch,step,train_loss,val_loss,val_ic,ic_ir_h5\n")
@@ -331,7 +425,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
     val_universe = pick_val_universe(all_syms, cfg.ic_val_symbols, cfg.seed)
     val_dates = pick_val_dates(cfg.train_end_date, cfg.val_end_date, cfg.ic_val_dates)
     buffer_start = (pd.Timestamp(cfg.train_end_date) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
-    actual_cache = {}
+    actual_open_cache = {}
     for sym in val_universe:
         df = query_symbol(
             cfg.db_path,
@@ -340,7 +434,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
             end=(pd.Timestamp(cfg.val_end_date) + pd.Timedelta(days=cfg.pred_len * 3)).strftime("%Y-%m-%d"),
         )
         if len(df):
-            actual_cache[sym] = pd.Series(df["close"].values, index=pd.DatetimeIndex(df["date"]))
+            actual_open_cache[sym] = pd.Series(df["open"].values, index=pd.DatetimeIndex(df["date"]))
     stopper = EarlyStopper(patience=cfg.early_stop_patience, mode="max")
 
     for epoch in range(start_epoch, cfg.basemodel_epochs):
@@ -372,27 +466,32 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
             ):
                 logits = model(token_in[0], token_in[1], batch_x_stamp[:, :-1, :])
                 loss, _, _ = model.head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
+                total_loss = _combine_training_loss(loss, cfg.ranking_loss_alpha)
 
             optimizer.zero_grad(set_to_none=True)
             if scaler is not None:
-                scaler.scale(loss).backward()
+                scaler.scale(total_loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                loss.backward()
+                total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
                 optimizer.step()
             scheduler.step()
             global_step += 1
 
             if global_step % cfg.log_interval == 0:
-                print(f"[epoch {epoch+1} step {global_step}] loss={loss.item():.4f}")
+                print(f"[epoch {epoch+1} step {global_step}] loss={total_loss.item():.4f}")
 
             if global_step % cfg.save_steps == 0:
                 _save_checkpoint(ckpt_dir, global_step, epoch, model, optimizer, scheduler)
-                _gdrive_sync_checkpoint(ckpt_dir / f"ckpt-{global_step}.pt", f"{remote_root}/checkpoints")
+                _backup_predictor_checkpoint(
+                    cfg,
+                    ckpt_path=ckpt_dir / f"ckpt-{global_step}.pt",
+                    remote_root=remote_root,
+                )
 
             if max_steps > 0 and global_step >= max_steps:
                 return
@@ -409,7 +508,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         )
         model.eval()
         predict_fn = _make_predict_batch_fn(predictor)
-        actual_fn = lambda sym, last, n: _actual_close_lookup(cfg, actual_cache, sym, last, n)
+        actual_fn = lambda sym, last, n: _actual_open_lookup(cfg, actual_open_cache, sym, last, n)
         ctx_fn = lambda sym, rebal_date: _build_ctx_for_date(cfg, sym, rebal_date)
 
         val_ic = validate_predictor_ic(predict_fn, actual_fn, val_universe, val_dates, cfg, ctx_fn)
@@ -419,7 +518,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         ic_ir_str = f"{ic_ir_h5:.4f}" if not (ic_ir_h5 != ic_ir_h5) else "nan"
         print(f"  val_loss={val_loss:.4f}  val_ic={val_ic:.4f}  ic_ir_h5={ic_ir_str}")
         with open(log_path, "a") as f:
-            f.write(f"{epoch+1},{global_step},{loss.item():.4f},{val_loss:.4f},{val_ic:.4f},{ic_ir_str}\n")
+            f.write(f"{epoch+1},{global_step},{total_loss.item():.4f},{val_loss:.4f},{val_ic:.4f},{ic_ir_str}\n")
 
         # Use ic_ir_h5 for early stopping; fall back to val_ic if ic_ir_h5 is nan
         stop_metric = ic_ir_h5 if (ic_ir_h5 == ic_ir_h5) else val_ic
