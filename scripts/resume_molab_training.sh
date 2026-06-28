@@ -65,17 +65,27 @@ if [[ "$STAGE" != "tokenizer" && "$STAGE" != "predictor" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$CONFIG_PATH" ]]; then
-  echo "Missing config: $CONFIG_PATH" >&2
-  exit 1
-fi
-
 GIT_BIN="${KRONOS_GIT_BIN:-git}"
 LAUNCH_PYTHON="${KRONOS_LAUNCH_PYTHON:-python3}"
 LAUNCH_WAIT_SECONDS="${KRONOS_LAUNCH_WAIT_SECONDS:-2}"
 STATE_DIR="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$STATE_DIR")"
-CONFIG_PATH="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$CONFIG_PATH")"
-CONFIG_DIR="$(dirname "$CONFIG_PATH")"
+ORIGINAL_CWD="$(pwd)"
+CONFIG_DIR=""
+resolve_config_path() {
+  if [[ "$CONFIG_PATH" = /* ]]; then
+    CONFIG_PATH="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$CONFIG_PATH")"
+  elif [[ -f "$CONFIG_PATH" ]]; then
+    CONFIG_PATH="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$CONFIG_PATH")"
+  elif [[ -f "$REPO_DIR/$CONFIG_PATH" ]]; then
+    CONFIG_PATH="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$REPO_DIR/$CONFIG_PATH")"
+  elif [[ -f "$ORIGINAL_CWD/$CONFIG_PATH" ]]; then
+    CONFIG_PATH="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$ORIGINAL_CWD/$CONFIG_PATH")"
+  else
+    echo "Missing config: $CONFIG_PATH" >&2
+    exit 1
+  fi
+  CONFIG_DIR="$(dirname "$CONFIG_PATH")"
+}
 
 mkdir -p "$STATE_DIR/data" "$STATE_DIR/outputs" "$STATE_DIR/logs" "$STATE_DIR/run"
 
@@ -137,20 +147,6 @@ raise SystemExit(0)
 PY
 }
 
-DB_PATH="$(resolve_path "$(read_config_value db_path)")"
-OUTPUT_DIR="$(resolve_path "$(read_config_value output_dir)")"
-EXP_NAME="$(read_config_value exp_name)"
-
-if ! path_within_dir "$DB_PATH" "$STATE_DIR"; then
-  echo "db_path must live under state-dir" >&2
-  exit 1
-fi
-
-if ! path_within_dir "$OUTPUT_DIR" "$STATE_DIR"; then
-  echo "output_dir must live under state-dir" >&2
-  exit 1
-fi
-
 stop_pidfile() {
   local pidfile="$1"
   local expected_substring="$2"
@@ -208,6 +204,21 @@ if [[ -n "$BRANCH" ]]; then
   "$GIT_BIN" -C "$REPO_DIR" fetch origin "$BRANCH" >/dev/null 2>&1
   "$GIT_BIN" -C "$REPO_DIR" checkout "$BRANCH" >/dev/null 2>&1
   "$GIT_BIN" -C "$REPO_DIR" reset --hard "origin/$BRANCH" >/dev/null 2>&1
+fi
+
+resolve_config_path
+DB_PATH="$(resolve_path "$(read_config_value db_path)")"
+OUTPUT_DIR="$(resolve_path "$(read_config_value output_dir)")"
+EXP_NAME="$(read_config_value exp_name)"
+
+if ! path_within_dir "$DB_PATH" "$STATE_DIR"; then
+  echo "db_path must live under state-dir" >&2
+  exit 1
+fi
+
+if ! path_within_dir "$OUTPUT_DIR" "$STATE_DIR"; then
+  echo "output_dir must live under state-dir" >&2
+  exit 1
 fi
 
 TRAIN_LOG="$STATE_DIR/logs/${STAGE}_train_stdout.log"

@@ -14,7 +14,13 @@ from torch.utils.data import DataLoader
 from model import KronosTokenizer
 from finetune_tw.config import Config
 from finetune_tw.dataset import MultiStockDataset
-from finetune_tw.hf_utils import local_checkpoints, push_checkpoint, restore_checkpoints
+from finetune_tw.hf_utils import (
+    local_checkpoints,
+    push_best_model,
+    push_checkpoint,
+    restore_checkpoints,
+    wait_for_pushes,
+)
 
 
 def _gdrive_sync(local_dir: Path, remote: str = "gdrive:Kronos/outputs") -> None:
@@ -218,6 +224,13 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
             tokenizer.save_pretrained(str(save_dir / "best_model"))
             print(f"  -> new best val_loss={val_loss:.4f}, saved.")
             _gdrive_sync(save_dir / "best_model", remote=remote_root)
+            if cfg.hf_repo and cfg.hf_revision_out:
+                push_best_model(
+                    save_dir / "best_model",
+                    cfg.hf_repo,
+                    "tokenizer/best_model",
+                    cfg.hf_revision_out,
+                )
 
 
 def _validate(
@@ -257,16 +270,20 @@ def _save_checkpoint(ckpt_dir: Path, step: int, epoch: int, model, optimizer, sc
 
 
 def _load_latest_checkpoint(ckpt_dir: Path, model, optimizer, scheduler):
-    ckpts = sorted(ckpt_dir.glob("ckpt-*.pt"),
-                   key=lambda p: int(p.stem.split("-")[1]))
+    ckpts = local_checkpoints(ckpt_dir)
     if not ckpts:
         return 0, 0
-    state = torch.load(ckpts[-1], map_location="cpu", weights_only=True)
-    model.load_state_dict(state["model"])
-    optimizer.load_state_dict(state["optimizer"])
-    scheduler.load_state_dict(state["scheduler"])
-    print(f"Resumed from {ckpts[-1].name} (step {state['step']})")
-    return state.get("epoch", 0), state["step"]
+    for ckpt in reversed(ckpts):
+        try:
+            state = torch.load(ckpt, map_location="cpu", weights_only=True)
+            model.load_state_dict(state["model"])
+            optimizer.load_state_dict(state["optimizer"])
+            scheduler.load_state_dict(state["scheduler"])
+            print(f"Resumed from {ckpt.name} (step {state['step']})")
+            return state.get("epoch", 0), state["step"]
+        except Exception as exc:
+            print(f"Skipping checkpoint {ckpt.name}: {exc}")
+    return 0, 0
 
 
 def main() -> None:
@@ -274,6 +291,7 @@ def main() -> None:
     parser.add_argument("--config", default="finetune_tw/configs/config_tw_daily.yaml")
     cfg = Config.from_yaml(parser.parse_args().config)
     run_training(cfg)
+    wait_for_pushes()
 
 
 if __name__ == "__main__":

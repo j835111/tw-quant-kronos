@@ -7,6 +7,7 @@ from finetune_tw.db import init_db, upsert_prices
 from finetune_tw.train_predictor import (
     _build_ctx_for_date,
     _backup_predictor_checkpoint,
+    _ensure_tokenizer_best_model,
     _restore_predictor_training_state,
     _resolve_amp,
     _steps_for_epoch,
@@ -279,4 +280,26 @@ def test_backup_predictor_checkpoint_pushes_gdrive_and_hf_when_configured(tmp_pa
             "checkpoints-round-3",
             7,
         ),
+    ]
+
+
+def test_ensure_tokenizer_best_model_restores_from_hf_when_missing(tmp_path, monkeypatch):
+    exp_dir = tmp_path
+    calls = []
+
+    def fake_restore_best_model(exp_dir_arg, repo_id, subfolder, revision):
+        calls.append((exp_dir_arg, repo_id, subfolder, revision))
+        target = exp_dir_arg / subfolder
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "model.safetensors").write_bytes(b"x")
+        return True
+
+    monkeypatch.setattr("finetune_tw.train_predictor.restore_best_model", fake_restore_best_model)
+
+    cfg = Config(hf_repo="org/repo", hf_revision_out="round-3")
+    path = _ensure_tokenizer_best_model(cfg, exp_dir)
+
+    assert path == exp_dir / "tokenizer" / "best_model"
+    assert calls == [
+        (exp_dir, "org/repo", "tokenizer/best_model", "round-3"),
     ]

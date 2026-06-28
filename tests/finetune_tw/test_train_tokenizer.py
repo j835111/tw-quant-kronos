@@ -2,6 +2,7 @@ import torch
 
 from finetune_tw.config import Config
 from finetune_tw.train_tokenizer import (
+    _load_latest_checkpoint,
     _backup_tokenizer_checkpoint,
     _resolve_runtime_flags,
     _restore_tokenizer_training_state,
@@ -192,4 +193,48 @@ def test_backup_tokenizer_checkpoint_pushes_gdrive_and_hf_when_configured(tmp_pa
             "checkpoints-round-3",
             7,
         ),
+    ]
+
+
+def test_load_latest_checkpoint_skips_corrupt_newest_file(tmp_path, monkeypatch):
+    ckpt_dir = tmp_path / "tokenizer" / "checkpoints"
+    ckpt_dir.mkdir(parents=True)
+    (ckpt_dir / "ckpt-10.pt").write_bytes(b"corrupt")
+    good = {
+        "step": 9,
+        "epoch": 2,
+        "model": {"m": 1},
+        "optimizer": {"o": 2},
+        "scheduler": {"s": 3},
+    }
+    (ckpt_dir / "ckpt-9.pt").write_bytes(b"x")
+
+    calls = []
+
+    class FakeObj:
+        def __init__(self, key):
+            self.key = key
+
+        def load_state_dict(self, payload):
+            calls.append((self.key, payload))
+
+    def fake_torch_load(path, map_location=None, weights_only=None):
+        if path.name == "ckpt-10.pt":
+            raise RuntimeError("bad checkpoint")
+        return good
+
+    monkeypatch.setattr("finetune_tw.train_tokenizer.torch.load", fake_torch_load)
+
+    epoch, step = _load_latest_checkpoint(
+        ckpt_dir,
+        FakeObj("model"),
+        FakeObj("optimizer"),
+        FakeObj("scheduler"),
+    )
+
+    assert (epoch, step) == (2, 9)
+    assert calls == [
+        ("model", {"m": 1}),
+        ("optimizer", {"o": 2}),
+        ("scheduler", {"s": 3}),
     ]

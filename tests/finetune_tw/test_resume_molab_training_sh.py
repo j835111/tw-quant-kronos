@@ -171,6 +171,9 @@ def test_resume_script_rejects_paths_outside_state_dir(
 ):
     state_dir = tmp_path / "state"
     state_dir.mkdir()
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git-valid").write_text("ok", encoding="utf-8")
     config_path = tmp_path / "bad.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -182,10 +185,25 @@ def test_resume_script_rejects_paths_outside_state_dir(
         ),
         encoding="utf-8",
     )
+    fake_git = tmp_path / "fake-git"
+    fake_python = tmp_path / "fake-python"
+    _write_fake_git(fake_git)
+    _write_fake_python(fake_python)
+    env = _base_env(tmp_path, fake_git, fake_python)
 
     result = subprocess.run(
-        ["bash", str(SCRIPT_PATH), "--config", str(config_path), "--state-dir", str(state_dir)],
+        [
+            "bash",
+            str(SCRIPT_PATH),
+            "--config",
+            str(config_path),
+            "--state-dir",
+            str(state_dir),
+            "--repo-dir",
+            str(repo_dir),
+        ],
         cwd=tmp_path,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -256,6 +274,87 @@ def test_resume_script_reclones_invalid_repo_and_launches_training(tmp_path):
                 "finetune_tw.train_predictor",
                 "--config",
                 str(config_path),
+            ],
+            "cwd": str(repo_dir),
+        }
+    ]
+
+
+def test_resume_script_resolves_repo_relative_config_after_clone(tmp_path):
+    state_dir = tmp_path / "state"
+    repo_dir = tmp_path / "repo"
+    config_rel = Path("finetune_tw/configs/config.yaml")
+
+    fake_git = tmp_path / "fake-git"
+    fake_git.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import os
+            import sys
+            from pathlib import Path
+
+            args = sys.argv[1:]
+            if len(args) >= 4 and args[0] == "-C" and args[2:4] == ["rev-parse", "--is-inside-work-tree"]:
+                repo_dir = Path(args[1])
+                raise SystemExit(0 if (repo_dir / ".git-valid").exists() else 128)
+            if len(args) >= 3 and args[0] == "clone":
+                repo_dir = Path(args[2])
+                repo_dir.mkdir(parents=True, exist_ok=True)
+                (repo_dir / ".git-valid").write_text("ok", encoding="utf-8")
+                config_path = repo_dir / "finetune_tw" / "configs" / "config.yaml"
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                config_path.write_text(
+                    f'db_path: "{os.environ["KRONOS_TEST_STATE_DIR"]}/data/tw_stocks.db"\\n'
+                    f'output_dir: "{os.environ["KRONOS_TEST_STATE_DIR"]}/outputs"\\n'
+                    'exp_name: "demo_exp"\\n',
+                    encoding="utf-8",
+                )
+                raise SystemExit(0)
+            raise SystemExit(0)
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    fake_python = tmp_path / "fake-python"
+    _write_fake_python(fake_python)
+    env = _base_env(tmp_path, fake_git, fake_python)
+    env["KRONOS_TEST_STATE_DIR"] = str(state_dir)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT_PATH),
+            "--config",
+            str(config_rel),
+            "--repo-url",
+            "https://example.com/repo.git",
+            "--repo-dir",
+            str(repo_dir),
+            "--state-dir",
+            str(state_dir),
+            "--stage",
+            "predictor",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    launches = [
+        json.loads(line)
+        for line in (tmp_path / "python.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert launches == [
+        {
+            "argv": [
+                "-m",
+                "finetune_tw.train_predictor",
+                "--config",
+                str(repo_dir / config_rel),
             ],
             "cwd": str(repo_dir),
         }

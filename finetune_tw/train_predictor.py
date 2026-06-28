@@ -32,6 +32,7 @@ from finetune_tw.hf_utils import (
     push_best_model,
     push_checkpoint,
     push_file,
+    restore_best_model,
     restore_checkpoints,
     wait_for_pushes,
 )
@@ -286,14 +287,29 @@ def _make_predict_batch_fn(predictor):
     return fn
 
 
+def _ensure_tokenizer_best_model(cfg: Config, exp_dir: Path) -> Path:
+    tok_path = exp_dir / "tokenizer" / "best_model"
+    if tok_path.exists():
+        return tok_path
+    if cfg.hf_repo and cfg.hf_revision_out:
+        restore_best_model(
+            exp_dir,
+            cfg.hf_repo,
+            "tokenizer/best_model",
+            cfg.hf_revision_out,
+        )
+    if not tok_path.exists():
+        raise FileNotFoundError(f"Tokenizer not found at {tok_path}. Run train_tokenizer.py first.")
+    return tok_path
+
+
 def run_training(cfg: Config, max_steps: int = -1) -> None:
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
     _configure_cuda_runtime(device, cfg.enable_tf32)
 
-    tok_path = Path(cfg.output_dir) / cfg.exp_name / "tokenizer" / "best_model"
-    if not tok_path.exists():
-        raise FileNotFoundError(f"Tokenizer not found at {tok_path}. Run train_tokenizer.py first.")
+    exp_dir = Path(cfg.output_dir) / cfg.exp_name
+    tok_path = _ensure_tokenizer_best_model(cfg, exp_dir)
 
     tokenizer = KronosTokenizer.from_pretrained(str(tok_path)).to(device)
     tokenizer.eval()
@@ -318,7 +334,6 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
     amp_enabled = amp_enabled and device.type == "cuda"
     scaler = GradScaler() if (amp_enabled and amp_dtype == torch.float16) else None
 
-    exp_dir = Path(cfg.output_dir) / cfg.exp_name
     save_dir = exp_dir / "predictor"
     ckpt_dir = save_dir / "checkpoints"
     remote_root = f"gdrive:Kronos/outputs/{cfg.exp_name}/predictor"
