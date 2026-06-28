@@ -203,8 +203,15 @@ def build_model_specs(cfg: Config) -> dict[str, ModelSpec]:
             label="Round 2",
             tok_src=tok_src_local or f"hf://{hf_repo}@round-0/tokenizer/best_model",
             tok_kwargs={},
+            pred_src=f"hf://{hf_repo}@round-2/predictor/best_model",
+            pred_kwargs={},
+        ),
+        "round3": ModelSpec(
+            label="Round 3",
+            tok_src=tok_src_local or f"hf://{hf_repo}@round-0/tokenizer/best_model",
+            tok_kwargs={},
             pred_src=str(local_pred) if has_weights(local_pred)
-                     else f"hf://{hf_repo}@round-2/predictor/best_model",
+                     else f"hf://{hf_repo}@round-3/predictor/best_model",
             pred_kwargs={},
         ),
     }
