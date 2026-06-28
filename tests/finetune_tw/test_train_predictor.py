@@ -10,6 +10,7 @@ from finetune_tw.train_predictor import (
     _build_ctx_for_date,
     _backup_predictor_checkpoint,
     _ensure_tokenizer_best_model,
+    _maybe_make_predict_prepared_batch_fn,
     _run_validation_metrics,
     _restore_predictor_training_state,
     _resolve_amp,
@@ -363,6 +364,93 @@ def test_training_validation_path_builds_contexts_once_and_reuses_rows(monkeypat
     assert len(calls["build"]) == 1
     assert len(calls["collect"]) == 1
     assert len(calls["metrics"]) == 1
+
+
+def test_run_validation_metrics_uses_prebuilt_contexts_without_rebuilding(monkeypatch):
+    cfg = Config(pred_len=3, lookback_window=3)
+    val_dates = pd.to_datetime(["2024-01-03", "2024-01-04"])
+    contexts_by_date = {
+        pd.Timestamp("2024-01-03"): [("AAA", object(), object(), object(), pd.Timestamp("2024-01-02"))],
+        pd.Timestamp("2024-01-04"): [("BBB", object(), object(), object(), pd.Timestamp("2024-01-03"))],
+    }
+    rows_by_date = {
+        pd.Timestamp("2024-01-03"): [("AAA", np.array([1.0, 2.0, 3.0]), 1.0, pd.Timestamp("2024-01-02"))],
+        pd.Timestamp("2024-01-04"): [("BBB", np.array([1.5, 2.5, 3.5]), 1.5, pd.Timestamp("2024-01-03"))],
+    }
+    calls = {"collect": [], "metrics": []}
+
+    def fail_build_validation_contexts(*args, **kwargs):
+        raise AssertionError("_build_validation_contexts should not be called when contexts_by_date is provided")
+
+    def fake_collect_validation_rows_by_date(
+        predict_batch_fn,
+        contexts_by_date_arg,
+        cfg_arg,
+        batch_size=64,
+        prepared_batch_predict_fn=None,
+    ):
+        calls["collect"].append(
+            (predict_batch_fn, contexts_by_date_arg, cfg_arg, batch_size, prepared_batch_predict_fn)
+        )
+        return rows_by_date
+
+    def fake_compute_validation_metrics_from_rows(
+        rows_by_date_arg,
+        actual_lookup_arg,
+        val_dates_arg,
+        cfg_arg,
+        target_horizon,
+        compute_ic=True,
+        compute_ic_ir=True,
+    ):
+        calls["metrics"].append(
+            (
+                rows_by_date_arg,
+                actual_lookup_arg,
+                list(val_dates_arg),
+                cfg_arg,
+                target_horizon,
+                compute_ic,
+                compute_ic_ir,
+            )
+        )
+        return 0.6, 0.3
+
+    monkeypatch.setattr(
+        "finetune_tw.train_predictor._build_validation_contexts",
+        fail_build_validation_contexts,
+    )
+    monkeypatch.setattr(
+        "finetune_tw.train_predictor.collect_validation_rows_by_date",
+        fake_collect_validation_rows_by_date,
+    )
+    monkeypatch.setattr(
+        "finetune_tw.train_predictor.compute_validation_metrics_from_rows",
+        fake_compute_validation_metrics_from_rows,
+    )
+
+    result = _run_validation_metrics(
+        cfg=cfg,
+        predict_batch_fn=object(),
+        prepared_batch_predict_fn=None,
+        actual_lookup=lambda sym, last_date, n: np.array([1.0, 2.0, 3.0], dtype=float),
+        val_universe=["AAA", "BBB"],
+        val_dates=val_dates,
+        contexts_by_date=contexts_by_date,
+    )
+
+    assert result == (0.6, 0.3)
+    assert len(calls["collect"]) == 1
+    assert calls["collect"][0][1] is contexts_by_date
+    assert len(calls["metrics"]) == 1
+
+
+def test_maybe_make_predict_prepared_batch_fn_returns_none_for_legacy_predictor():
+    class LegacyPredictor:
+        def predict_batch(self, *args, **kwargs):
+            return []
+
+    assert _maybe_make_predict_prepared_batch_fn(LegacyPredictor()) is None
 
 
 def test_token_cache_paths_are_split_specific(tmp_path):

@@ -361,6 +361,15 @@ def _make_predict_prepared_batch_fn(predictor):
     return fn
 
 
+def _maybe_make_predict_prepared_batch_fn(predictor):
+    if not (
+        hasattr(predictor, "prepare_batch_inputs")
+        and hasattr(predictor, "predict_prepared_batch")
+    ):
+        return None
+    return _make_predict_prepared_batch_fn(predictor)
+
+
 def _run_validation_metrics(
     cfg,
     predict_batch_fn,
@@ -369,8 +378,10 @@ def _run_validation_metrics(
     val_dates,
     batch_size=64,
     prepared_batch_predict_fn=None,
+    contexts_by_date=None,
 ):
-    contexts_by_date = _build_validation_contexts(cfg, val_universe, val_dates)
+    if contexts_by_date is None:
+        contexts_by_date = _build_validation_contexts(cfg, val_universe, val_dates)
     rows_by_date = collect_validation_rows_by_date(
         predict_batch_fn,
         contexts_by_date,
@@ -524,6 +535,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
     all_syms = [s for s in list_symbols(cfg.db_path) if s != cfg.benchmark_symbol]
     val_universe = pick_val_universe(all_syms, cfg.ic_val_symbols, cfg.seed)
     val_dates = pick_val_dates(cfg.train_end_date, cfg.val_end_date, cfg.ic_val_dates)
+    validation_contexts = _build_validation_contexts(cfg, val_universe, val_dates)
     buffer_start = (pd.Timestamp(cfg.train_end_date) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
     actual_open_cache = {}
     for sym in val_universe:
@@ -608,7 +620,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         )
         model.eval()
         predict_fn = _make_predict_batch_fn(predictor)
-        prepared_predict_fn = _make_predict_prepared_batch_fn(predictor)
+        prepared_predict_fn = _maybe_make_predict_prepared_batch_fn(predictor)
         actual_fn = lambda sym, last, n: _actual_open_lookup(cfg, actual_open_cache, sym, last, n)
         val_ic, ic_ir_h5 = _run_validation_metrics(
             cfg=cfg,
@@ -617,6 +629,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
             val_universe=val_universe,
             val_dates=val_dates,
             prepared_batch_predict_fn=prepared_predict_fn,
+            contexts_by_date=validation_contexts,
         )
 
         ic_ir_str = f"{ic_ir_h5:.4f}" if not (ic_ir_h5 != ic_ir_h5) else "nan"

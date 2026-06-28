@@ -158,13 +158,16 @@ def test_collect_rows_returns_open():
 def test_collect_rows_by_date_batches_once_per_date():
     cfg = SimpleNamespace(pred_len=3, val_ic_horizons=2)
     val_dates = pd.to_datetime(["2024-01-03", "2024-01-04"])
+    ctx_df_a, x_ts_a, y_ts_a, last_date_a, _ = _make_ctx(last_date="2024-01-02", ctx_ref=10.0)
+    ctx_df_b, x_ts_b, y_ts_b, last_date_b, _ = _make_ctx(last_date="2024-01-02", ctx_ref=11.0)
+    ctx_df_c, x_ts_c, y_ts_c, last_date_c, _ = _make_ctx(last_date="2024-01-03", ctx_ref=12.0)
     contexts_by_date = {
         pd.Timestamp("2024-01-03"): [
-            ("AAA", *_make_ctx(last_date="2024-01-02", ctx_ref=10.0)),
-            ("BBB", *_make_ctx(last_date="2024-01-02", ctx_ref=11.0)),
+            ("AAA", ctx_df_a, x_ts_a, y_ts_a, last_date_a),
+            ("BBB", ctx_df_b, x_ts_b, y_ts_b, last_date_b),
         ],
         pd.Timestamp("2024-01-04"): [
-            ("CCC", *_make_ctx(last_date="2024-01-03", ctx_ref=12.0)),
+            ("CCC", ctx_df_c, x_ts_c, y_ts_c, last_date_c),
         ],
     }
     pred_df = pd.DataFrame({"open": [11.0, 12.0, 13.0], "close": [11.0, 12.0, 13.0]})
@@ -191,10 +194,12 @@ def test_collect_rows_by_date_uses_prepared_batch_callback_with_precomputed_stam
     cfg = SimpleNamespace(pred_len=3, val_ic_horizons=2)
     x_stamp = np.ones((2, 5), dtype=np.float32)
     y_stamp = np.full((3, 5), 2.0, dtype=np.float32)
+    ctx_df_a, x_ts_a, y_ts_a, last_date_a, _ = _make_ctx(last_date="2024-01-02", ctx_ref=10.0)
+    ctx_df_b, x_ts_b, y_ts_b, last_date_b, _ = _make_ctx(last_date="2024-01-02", ctx_ref=11.0)
     contexts_by_date = {
         pd.Timestamp("2024-01-03"): [
-            ("AAA", *_make_ctx(last_date="2024-01-02", ctx_ref=10.0), x_stamp, y_stamp),
-            ("BBB", *_make_ctx(last_date="2024-01-02", ctx_ref=11.0), x_stamp * 3, y_stamp),
+            ("AAA", ctx_df_a, x_ts_a, y_ts_a, last_date_a, x_stamp, y_stamp),
+            ("BBB", ctx_df_b, x_ts_b, y_ts_b, last_date_b, x_stamp * 3, y_stamp),
         ],
     }
     pred_df = pd.DataFrame({"open": [11.0, 12.0, 13.0], "close": [11.0, 12.0, 13.0]})
@@ -239,6 +244,55 @@ def test_collect_rows_by_date_uses_prepared_batch_callback_with_precomputed_stam
     assert prepared_calls[0]["y_stamp_list"][0] is y_stamp
     assert prepared_calls[0]["y_stamp_list"][1] is y_stamp
     assert len(rows_by_date[pd.Timestamp("2024-01-03")]) == 2
+
+
+def test_collect_rows_by_date_falls_back_to_legacy_predict_when_no_prepared_callback():
+    cfg = SimpleNamespace(pred_len=3, val_ic_horizons=2)
+    x_stamp = np.ones((2, 5), dtype=np.float32)
+    y_stamp = np.full((3, 5), 2.0, dtype=np.float32)
+    ctx_df_a, x_ts_a, y_ts_a, last_date_a, _ = _make_ctx(last_date="2024-01-02", ctx_ref=10.0)
+    contexts_by_date = {
+        pd.Timestamp("2024-01-03"): [
+            ("AAA", ctx_df_a, x_ts_a, y_ts_a, last_date_a, x_stamp, y_stamp),
+        ],
+    }
+    pred_df = pd.DataFrame({"open": [11.0, 12.0, 13.0], "close": [11.0, 12.0, 13.0]})
+    legacy_calls = []
+
+    def predict_batch_fn(df_list, x_timestamp_list, y_timestamp_list, pred_len):
+        legacy_calls.append((df_list, x_timestamp_list, y_timestamp_list, pred_len))
+        return [pred_df.copy() for _ in df_list]
+
+    rows_by_date = collect_validation_rows_by_date(
+        predict_batch_fn,
+        contexts_by_date,
+        cfg,
+        prepared_batch_predict_fn=None,
+    )
+
+    assert len(legacy_calls) == 1
+    assert legacy_calls[0][3] == cfg.pred_len
+    assert len(rows_by_date[pd.Timestamp("2024-01-03")]) == 1
+
+
+def test_collect_rows_by_date_rejects_unsupported_context_tuple_shape():
+    cfg = SimpleNamespace(pred_len=3, val_ic_horizons=2)
+    ctx_df, x_ts, y_ts, last_date, ctx_ref = _make_ctx(last_date="2024-01-02", ctx_ref=10.0)
+    bad_contexts_by_date = {
+        pd.Timestamp("2024-01-03"): [
+            ("AAA", ctx_df, x_ts, y_ts, last_date, ctx_ref),
+        ],
+    }
+
+    def predict_batch_fn(df_list, x_timestamp_list, y_timestamp_list, pred_len):
+        raise AssertionError("predict_batch_fn should not be called for unsupported context tuple shape")
+
+    with pytest.raises(ValueError, match="Expected validation context tuples with 5 or 7 fields"):
+        collect_validation_rows_by_date(
+            predict_batch_fn,
+            bad_contexts_by_date,
+            cfg,
+        )
 
 
 def test_compute_validation_metrics_reuses_rows_for_both_outputs():

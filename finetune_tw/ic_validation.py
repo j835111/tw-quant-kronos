@@ -115,15 +115,20 @@ def collect_validation_rows_by_date(
         syms, dfs, x_timestamps, y_timestamps, last_dates = [], [], [], [], []
         x_stamps, y_stamps = [], []
         for context in contexts:
+            if len(context) not in (5, 7):
+                raise ValueError(
+                    "Expected validation context tuples with 5 or 7 fields; "
+                    f"got {len(context)} fields."
+                )
             sym, ctx_df, x_ts, y_ts, last_date = context[:5]
             syms.append(sym)
             dfs.append(ctx_df)
             x_timestamps.append(x_ts)
             y_timestamps.append(y_ts)
             last_dates.append(last_date)
-            if len(context) >= 7:
-                x_stamps.append(context[-2])
-                y_stamps.append(context[-1])
+            if len(context) == 7:
+                x_stamps.append(context[5])
+                y_stamps.append(context[6])
             else:
                 x_stamps.append(None)
                 y_stamps.append(None)
