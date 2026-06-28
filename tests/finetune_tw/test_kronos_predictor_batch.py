@@ -138,6 +138,57 @@ def test_predict_prepared_batch_matches_predict_batch():
         pd.testing.assert_frame_equal(direct_df, prepared_df)
 
 
+def test_prepare_batch_inputs_accepts_precomputed_timestamps(monkeypatch):
+    predictor = _make_predictor_stub()
+    df_list = [_make_df(0.0), _make_df(5.0)]
+    x_ts = pd.Series(pd.bdate_range("2024-01-01", periods=3))
+    y_ts = pd.Series(pd.bdate_range("2024-01-04", periods=2))
+    x_stamp = np.ones((3, 5), dtype=np.float32)
+    y_stamp = np.full((2, 5), 2.0, dtype=np.float32)
+
+    def fail_calc_time_stamps(_):
+        raise AssertionError("calc_time_stamps should not be called")
+
+    monkeypatch.setattr("model.kronos.calc_time_stamps", fail_calc_time_stamps)
+
+    _, x_stamp_batch, y_stamp_batch, _, _, _ = predictor.prepare_batch_inputs(
+        df_list=df_list,
+        x_timestamp_list=[x_ts, x_ts],
+        y_timestamp_list=[y_ts, y_ts],
+        pred_len=2,
+        x_stamp_list=[x_stamp, x_stamp],
+        y_stamp_list=[y_stamp, y_stamp],
+    )
+
+    assert x_stamp_batch.shape == (2, 3, 5)
+    assert y_stamp_batch.shape == (2, 2, 5)
+    np.testing.assert_allclose(x_stamp_batch[0], x_stamp, rtol=0, atol=0)
+    np.testing.assert_allclose(x_stamp_batch[1], x_stamp, rtol=0, atol=0)
+    np.testing.assert_allclose(y_stamp_batch[0], y_stamp, rtol=0, atol=0)
+    np.testing.assert_allclose(y_stamp_batch[1], y_stamp, rtol=0, atol=0)
+
+
+def test_prepare_batch_inputs_rejects_mismatched_precomputed_lengths():
+    predictor = _make_predictor_stub()
+    df_list = [_make_df(0.0)]
+    x_ts = pd.Series(pd.bdate_range("2024-01-01", periods=3))
+    y_ts = pd.Series(pd.bdate_range("2024-01-04", periods=2))
+
+    try:
+        predictor.prepare_batch_inputs(
+            df_list=df_list,
+            x_timestamp_list=[x_ts],
+            y_timestamp_list=[y_ts],
+            pred_len=2,
+            x_stamp_list=[],
+            y_stamp_list=[],
+        )
+    except ValueError as exc:
+        assert "consistent lengths" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for mismatched precomputed timestamp lengths")
+
+
 def test_predict_prepared_batch_validates_batch_sizes():
     predictor = _make_predictor_stub()
     x_batch = np.zeros((2, 3, 6), dtype=np.float32)

@@ -561,15 +561,27 @@ class KronosPredictor:
         pred_df = pd.DataFrame(preds, columns=self.price_cols + [self.vol_col, self.amt_vol], index=y_timestamp)
         return pred_df
 
-    def prepare_batch_inputs(self, df_list, x_timestamp_list, y_timestamp_list, pred_len):
+    def prepare_batch_inputs(
+        self,
+        df_list,
+        x_timestamp_list,
+        y_timestamp_list,
+        pred_len,
+        x_stamp_list=None,
+        y_stamp_list=None,
+    ):
         if not isinstance(df_list, (list, tuple)) or not isinstance(x_timestamp_list, (list, tuple)) or not isinstance(y_timestamp_list, (list, tuple)):
             raise ValueError("df_list, x_timestamp_list, y_timestamp_list must be list or tuple types.")
         if not (len(df_list) == len(x_timestamp_list) == len(y_timestamp_list)):
             raise ValueError("df_list, x_timestamp_list, y_timestamp_list must have consistent lengths.")
+        if x_stamp_list is not None and len(x_stamp_list) != len(df_list):
+            raise ValueError("df_list, x_timestamp_list, y_timestamp_list, and optional stamp lists must have consistent lengths.")
+        if y_stamp_list is not None and len(y_stamp_list) != len(df_list):
+            raise ValueError("df_list, x_timestamp_list, y_timestamp_list, and optional stamp lists must have consistent lengths.")
 
         x_list = []
-        x_stamp_list = []
-        y_stamp_list = []
+        x_stamp_batch_list = []
+        y_stamp_batch_list = []
         means = []
         stds = []
         y_index_list = []
@@ -595,12 +607,16 @@ class KronosPredictor:
 
             x_timestamp = x_timestamp_list[i]
             y_timestamp = y_timestamp_list[i]
-            x_time_df = calc_time_stamps(x_timestamp)
-            y_time_df = calc_time_stamps(y_timestamp)
 
             x = df[self.price_cols + [self.vol_col, self.amt_vol]].values.astype(np.float32)
-            x_stamp = x_time_df.values.astype(np.float32)
-            y_stamp = y_time_df.values.astype(np.float32)
+            if x_stamp_list is not None:
+                x_stamp = np.asarray(x_stamp_list[i], dtype=np.float32)
+            else:
+                x_stamp = calc_time_stamps(x_timestamp).values.astype(np.float32)
+            if y_stamp_list is not None:
+                y_stamp = np.asarray(y_stamp_list[i], dtype=np.float32)
+            else:
+                y_stamp = calc_time_stamps(y_timestamp).values.astype(np.float32)
 
             if x.shape[0] != x_stamp.shape[0]:
                 raise ValueError(f"Inconsistent lengths at index {i}: x has {x.shape[0]} vs x_stamp has {x_stamp.shape[0]}.")
@@ -611,8 +627,8 @@ class KronosPredictor:
             x_norm = np.clip((x - x_mean) / (x_std + 1e-5), -self.clip, self.clip)
 
             x_list.append(x_norm)
-            x_stamp_list.append(x_stamp)
-            y_stamp_list.append(y_stamp)
+            x_stamp_batch_list.append(x_stamp)
+            y_stamp_batch_list.append(y_stamp)
             means.append(x_mean)
             stds.append(x_std)
             y_index_list.append(pd.Index(y_timestamp))
@@ -625,8 +641,8 @@ class KronosPredictor:
             raise ValueError(f"Parallel prediction requires all series to have consistent prediction lengths, got: {y_lens}")
 
         x_batch = np.stack(x_list, axis=0).astype(np.float32)
-        x_stamp_batch = np.stack(x_stamp_list, axis=0).astype(np.float32)
-        y_stamp_batch = np.stack(y_stamp_list, axis=0).astype(np.float32)
+        x_stamp_batch = np.stack(x_stamp_batch_list, axis=0).astype(np.float32)
+        y_stamp_batch = np.stack(y_stamp_batch_list, axis=0).astype(np.float32)
         return x_batch, x_stamp_batch, y_stamp_batch, means, stds, y_index_list
 
     def predict_prepared_batch(
