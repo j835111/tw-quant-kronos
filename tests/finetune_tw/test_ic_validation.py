@@ -229,7 +229,7 @@ def test_compute_validation_metrics_reuses_rows_for_both_outputs():
 
     assert np.isfinite(val_ic)
     assert np.isfinite(ic_ir)
-    assert len(calls) == len(val_dates) * 3 * 2
+    assert len(calls) == len(val_dates) * 3
 
 
 def test_validate_ic_open_to_open():
@@ -316,3 +316,32 @@ def test_validate_ic_ir_open_to_open():
 
     assert np.isfinite(ic_ir)
     assert ic_ir > 1e7
+
+
+def test_validate_ic_ir_target_horizon_zero_short_circuits():
+    cfg = _make_cfg(pred_len=3, val_ic_horizons=2)
+    calls = {"predict": 0, "actual": 0}
+
+    def build_ctx_fn(sym, date):
+        raise AssertionError("build_ctx_fn should not be called when target_horizon <= 0")
+
+    def predict_batch_fn(df_list, x_timestamp_list, y_timestamp_list, pred_len):
+        calls["predict"] += 1
+        raise AssertionError("predict_batch_fn should not be called when target_horizon <= 0")
+
+    def actual_lookup(sym, last_date, n):
+        calls["actual"] += 1
+        raise AssertionError("actual_lookup should not be called when target_horizon <= 0")
+
+    ic_ir = validate_predictor_ic_ir(
+        predict_batch_fn,
+        actual_lookup,
+        ["AAA", "BBB", "CCC"],
+        pd.to_datetime(["2024-01-03", "2024-01-04"]),
+        cfg,
+        build_ctx_fn,
+        target_horizon=0,
+    )
+
+    assert np.isnan(ic_ir)
+    assert calls == {"predict": 0, "actual": 0}

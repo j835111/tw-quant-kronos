@@ -142,40 +142,47 @@ def compute_validation_metrics_from_rows(
     val_dates,
     cfg,
     target_horizon: int = 5,
+    compute_ic: bool = True,
+    compute_ic_ir: bool = True,
 ):
     """Compute mean cross-sectional IC and target-horizon IC-IR from shared rows."""
-    horizons = min(cfg.val_ic_horizons, cfg.pred_len - 1)
-    per_group = {}
     normalized_dates = [pd.Timestamp(date) for date in val_dates]
+    cached_rows_by_date = {}
     for date in normalized_dates:
         rows = rows_by_date.get(date, [])
-        actual_by_row = []
+        cached_rows = []
         for sym, pred_open, pred_open_t1, last_date in rows:
             actual_open = np.asarray(actual_lookup(sym, last_date, cfg.pred_len), dtype=float)
-            actual_by_row.append((pred_open, pred_open_t1, actual_open))
-        for horizon in range(horizons):
-            pred_returns, actual_returns = [], []
-            for pred_open, pred_open_t1, actual_open in actual_by_row:
-                if len(actual_open) <= horizon + 1:
-                    continue
-                actual_open_t1 = actual_open[0]
-                if pred_open_t1 <= 0 or actual_open_t1 <= 0:
-                    continue
-                pred_returns.append(pred_open[horizon + 1] / pred_open_t1 - 1.0)
-                actual_returns.append(actual_open[horizon + 1] / actual_open_t1 - 1.0)
-            if len(pred_returns) >= 3:
-                per_group[(date, horizon + 1)] = (pred_returns, actual_returns)
+            cached_rows.append((pred_open, pred_open_t1, actual_open))
+        cached_rows_by_date[date] = cached_rows
 
-    max_horizon = min(target_horizon, cfg.pred_len - 1)
+    val_ic = float("nan")
+    if compute_ic:
+        horizons = min(cfg.val_ic_horizons, cfg.pred_len - 1)
+        per_group = {}
+        for date in normalized_dates:
+            for horizon in range(horizons):
+                pred_returns, actual_returns = [], []
+                for pred_open, pred_open_t1, actual_open in cached_rows_by_date[date]:
+                    if len(actual_open) <= horizon + 1:
+                        continue
+                    actual_open_t1 = actual_open[0]
+                    if pred_open_t1 <= 0 or actual_open_t1 <= 0:
+                        continue
+                    pred_returns.append(pred_open[horizon + 1] / pred_open_t1 - 1.0)
+                    actual_returns.append(actual_open[horizon + 1] / actual_open_t1 - 1.0)
+                if len(pred_returns) >= 3:
+                    per_group[(date, horizon + 1)] = (pred_returns, actual_returns)
+        val_ic = mean_cross_sectional_ic(per_group)
+
     ic_ir = float("nan")
-    if max_horizon > 0:
+    max_horizon = min(target_horizon, cfg.pred_len - 1)
+    if compute_ic_ir and max_horizon > 0:
         horizon_idx = max_horizon - 1
         per_date_ic: list[float] = []
         for date in normalized_dates:
-            rows = rows_by_date.get(date, [])
             pred_returns, actual_returns = [], []
-            for sym, pred_open, pred_open_t1, last_date in rows:
-                actual_open = np.asarray(actual_lookup(sym, last_date, cfg.pred_len), dtype=float)
+            for pred_open, pred_open_t1, actual_open in cached_rows_by_date[date]:
                 if len(actual_open) <= horizon_idx + 1:
                     continue
                 actual_open_t1 = actual_open[0]
@@ -190,7 +197,7 @@ def compute_validation_metrics_from_rows(
             arr = np.array(per_date_ic)
             ic_ir = float(arr.mean() / (arr.std() + 1e-8))
 
-    return mean_cross_sectional_ic(per_group), ic_ir
+    return val_ic, ic_ir
 
 
 def validate_predictor_ic(
@@ -219,7 +226,8 @@ def validate_predictor_ic(
         actual_lookup,
         val_dates,
         cfg,
-        target_horizon=min(cfg.pred_len - 1, getattr(cfg, "val_ic_horizons", cfg.pred_len)),
+        compute_ic=True,
+        compute_ic_ir=False,
     )
     return val_ic
 
@@ -239,6 +247,9 @@ def validate_predictor_ic_ir(
     More noise-robust than IC mean: rewards consistent signal over single-day spikes.
     Returns nan if fewer than 3 finite IC values are available.
     """
+    if min(target_horizon, cfg.pred_len - 1) <= 0:
+        return float("nan")
+
     rows_by_date = {
         pd.Timestamp(date): _collect_rows_for_date(
             predict_batch_fn,
@@ -256,5 +267,7 @@ def validate_predictor_ic_ir(
         val_dates,
         cfg,
         target_horizon=target_horizon,
+        compute_ic=False,
+        compute_ic_ir=True,
     )
     return ic_ir
