@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from finetune_tw.backtest_data import (
     build_rebalance_inputs,
@@ -37,12 +38,12 @@ def test_load_symbol_history_frames_groups_by_symbol_and_keeps_ohlcva(tmp_path):
 
     frames = load_symbol_history_frames(
         db_path,
-        ["1101.TW", "1216.TW"],
+        ["1216.TW", "1101.TW"],
         start="2024-01-01",
         end="2024-01-31",
     )
 
-    assert sorted(frames) == ["1101.TW", "1216.TW"]
+    assert list(frames.keys()) == ["1216.TW", "1101.TW"]
     assert list(frames["1101.TW"].columns) == [
         "open",
         "high",
@@ -91,6 +92,30 @@ def test_load_symbol_history_frames_returns_empty_dict_when_no_rows(tmp_path):
     ) == {}
 
 
+def test_load_price_helpers_raise_for_invalid_fields(tmp_path):
+    db_path = str(tmp_path / "history.db")
+    init_db(db_path)
+    upsert_prices(db_path, "1101.TW", _make_history("2024-01-01", 4, 10.0))
+
+    with pytest.raises(ValueError, match="Expected field to be one of"):
+        load_price_field_series(
+            db_path,
+            ["1101.TW"],
+            start="2024-01-01",
+            end="2024-01-31",
+            field="adj_close",
+        )
+
+    with pytest.raises(ValueError, match="Expected fields to be drawn from"):
+        load_price_frame_fields(
+            db_path,
+            ["1101.TW"],
+            start="2024-01-01",
+            end="2024-01-31",
+            fields=["open", "adj_close"],
+        )
+
+
 def test_build_rebalance_inputs_uses_preloaded_history_and_skips_invalid_symbols():
     dates = pd.bdate_range("2024-01-01", periods=6)
 
@@ -135,6 +160,7 @@ def test_build_rebalance_inputs_uses_preloaded_history_and_skips_invalid_symbols
         "volume",
         "amount",
     ]
+    assert isinstance(batch_dfs[0].index, pd.RangeIndex)
     assert list(batch_dfs[0]["open"]) == [13.0, 14.0, 15.0]
     assert list(batch_xts[0].dt.strftime("%Y-%m-%d")) == [
         "2024-01-04",

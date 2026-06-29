@@ -6,6 +6,23 @@ from finetune_tw.db import query_symbols_window
 
 
 _OHLCVA_COLUMNS = ["open", "high", "low", "close", "volume", "amount"]
+_OHLCVA_COLUMN_SET = set(_OHLCVA_COLUMNS)
+
+
+def _validate_field(field: str) -> None:
+    if field not in _OHLCVA_COLUMN_SET:
+        allowed = ", ".join(_OHLCVA_COLUMNS)
+        raise ValueError(f"Expected field to be one of: {allowed}")
+
+
+def _validate_fields(fields: list[str]) -> None:
+    invalid = [field for field in fields if field not in _OHLCVA_COLUMN_SET]
+    if invalid:
+        allowed = ", ".join(_OHLCVA_COLUMNS)
+        invalid_text = ", ".join(invalid)
+        raise ValueError(
+            f"Expected fields to be drawn from: {allowed}. Got invalid fields: {invalid_text}"
+        )
 
 
 def load_symbol_history_frames(
@@ -14,16 +31,22 @@ def load_symbol_history_frames(
     start: str,
     end: str,
 ) -> dict[str, pd.DataFrame]:
+    """Load OHLCVA history once and return per-symbol frames in input order."""
     history = query_symbols_window(db_path, symbols, start=start, end=end)
     if history.empty:
         return {}
 
-    frames: dict[str, pd.DataFrame] = {}
-    for symbol, frame in history.groupby("symbol", sort=True):
+    grouped_frames: dict[str, pd.DataFrame] = {}
+    for symbol, frame in history.groupby("symbol", sort=False):
         symbol_frame = frame.loc[:, ["date", *_OHLCVA_COLUMNS]].copy()
         symbol_frame["date"] = pd.to_datetime(symbol_frame["date"])
-        frames[symbol] = symbol_frame.set_index("date").sort_index()
-    return frames
+        grouped_frames[symbol] = symbol_frame.set_index("date").sort_index()
+
+    return {
+        symbol: grouped_frames[symbol]
+        for symbol in symbols
+        if symbol in grouped_frames
+    }
 
 
 def load_price_field_series(
@@ -33,6 +56,8 @@ def load_price_field_series(
     end: str,
     field: str,
 ) -> dict[str, pd.Series]:
+    """Return one OHLCVA field per symbol as a Series."""
+    _validate_field(field)
     frames = load_symbol_history_frames(db_path, symbols, start=start, end=end)
     return {symbol: frame[field].copy() for symbol, frame in frames.items()}
 
@@ -44,6 +69,8 @@ def load_price_frame_fields(
     end: str,
     fields: list[str],
 ) -> dict[str, pd.DataFrame]:
+    """Return selected OHLCVA fields per symbol as DataFrames."""
+    _validate_fields(fields)
     frames = load_symbol_history_frames(db_path, symbols, start=start, end=end)
     return {symbol: frame.loc[:, fields].copy() for symbol, frame in frames.items()}
 
@@ -55,6 +82,7 @@ def build_rebalance_inputs(
     lookback_window: int,
     pred_len: int,
 ) -> tuple[list[str], list[pd.DataFrame], list[pd.Series], list[pd.Series]]:
+    """Build one rebalance batch from preloaded history, skipping short or NaN contexts."""
     batch_syms: list[str] = []
     batch_dfs: list[pd.DataFrame] = []
     batch_xts: list[pd.Series] = []
