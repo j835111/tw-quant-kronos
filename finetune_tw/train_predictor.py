@@ -402,12 +402,15 @@ def _ensure_tokenizer_best_model(cfg: Config, exp_dir: Path) -> Path:
     tok_path = exp_dir / "tokenizer" / "best_model"
     if tok_path.exists():
         return tok_path
-    if cfg.hf_repo and cfg.hf_revision_out:
+    # hf_tokenizer_revision lets tokenizer and predictor come from different HF revisions.
+    # Falls back to hf_revision_out for backward compatibility.
+    tok_revision = getattr(cfg, "hf_tokenizer_revision", None) or cfg.hf_revision_out
+    if cfg.hf_repo and tok_revision:
         restore_best_model(
             exp_dir,
             cfg.hf_repo,
             "tokenizer/best_model",
-            cfg.hf_revision_out,
+            tok_revision,
         )
     if not tok_path.exists():
         raise FileNotFoundError(f"Tokenizer not found at {tok_path}. Run train_tokenizer.py first.")
@@ -441,6 +444,15 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         print(f"  Loaded predictor from {cfg.pretrained_predictor}@{cfg.hf_revision}/predictor/best_model")
     else:
         model = Kronos.from_pretrained(cfg.pretrained_predictor).to(device)
+
+    # FPT selective freeze: freeze self_attn + ffn, train only LayerNorm + head
+    if getattr(cfg, "fpt_freeze", False):
+        for name, param in model.named_parameters():
+            param.requires_grad_(not any(k in name for k in ("self_attn", "ffn")))
+        n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        n_total = sum(p.numel() for p in model.parameters())
+        print(f"  FPT freeze: trainable {n_train/1e6:.1f}M / {n_total/1e6:.1f}M ({100*n_train/n_total:.1f}%)")
+
     amp_enabled, amp_dtype = _resolve_amp(cfg.amp_dtype)
     amp_enabled = amp_enabled and device.type == "cuda"
     scaler = GradScaler() if (amp_enabled and amp_dtype == torch.float16) else None
@@ -510,13 +522,16 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
 
     train_steps_per_epoch = _steps_for_epoch(len(train_loader), cfg.train_steps_per_epoch)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.predictor_lr,
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable_params, lr=cfg.predictor_lr,
                                   betas=(cfg.adam_beta1, cfg.adam_beta2),
                                   weight_decay=cfg.adam_weight_decay)
+    warmup_pct = getattr(cfg, "warmup_pct", 0.08)
+    warmup_div = getattr(cfg, "warmup_div_factor", 25)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=cfg.predictor_lr,
         steps_per_epoch=train_steps_per_epoch, epochs=cfg.basemodel_epochs,
-        pct_start=0.03, div_factor=10,
+        pct_start=warmup_pct, div_factor=warmup_div,
     )
     start_epoch, global_step = _restore_predictor_training_state(
         cfg,
@@ -529,7 +544,8 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
     )
     log_path = save_dir / "train_log.csv"
     if not log_path.exists():
-        log_path.write_text("epoch,step,train_loss,val_loss,val_ic,ic_ir_h5\n")
+        ic_target_h = getattr(cfg, "ic_target_horizon", 1)
+        log_path.write_text(f"epoch,step,train_loss,val_loss,val_ic,ic_ir_h{ic_target_h}\n")
 
     predictor = KronosPredictor(model, tokenizer, device=device, max_context=cfg.max_context)
     all_syms = [s for s in list_symbols(cfg.db_path) if s != cfg.benchmark_symbol]
@@ -622,7 +638,8 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         predict_fn = _make_predict_batch_fn(predictor)
         prepared_predict_fn = _maybe_make_predict_prepared_batch_fn(predictor)
         actual_fn = lambda sym, last, n: _actual_open_lookup(cfg, actual_open_cache, sym, last, n)
-        val_ic, ic_ir_h5 = _run_validation_metrics(
+        ic_target_h = getattr(cfg, "ic_target_horizon", 1)
+        val_ic, ic_ir = _run_validation_metrics(
             cfg=cfg,
             predict_batch_fn=predict_fn,
             actual_lookup=actual_fn,
@@ -630,19 +647,20 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
             val_dates=val_dates,
             prepared_batch_predict_fn=prepared_predict_fn,
             contexts_by_date=validation_contexts,
+            target_horizon=ic_target_h,
         )
 
-        ic_ir_str = f"{ic_ir_h5:.4f}" if not (ic_ir_h5 != ic_ir_h5) else "nan"
-        print(f"  val_loss={val_loss:.4f}  val_ic={val_ic:.4f}  ic_ir_h5={ic_ir_str}")
+        ic_ir_str = f"{ic_ir:.4f}" if not (ic_ir != ic_ir) else "nan"
+        print(f"  val_loss={val_loss:.4f}  val_ic={val_ic:.4f}  ic_ir_h{ic_target_h}={ic_ir_str}")
         with open(log_path, "a") as f:
             f.write(f"{epoch+1},{global_step},{total_loss.item():.4f},{val_loss:.4f},{val_ic:.4f},{ic_ir_str}\n")
 
-        # Use ic_ir_h5 for early stopping; fall back to val_ic if ic_ir_h5 is nan
-        stop_metric = ic_ir_h5 if (ic_ir_h5 == ic_ir_h5) else val_ic
+        # Use ic_ir for early stopping; fall back to val_ic if ic_ir is nan
+        stop_metric = ic_ir if (ic_ir == ic_ir) else val_ic
         is_best, should_stop = stopper.update(stop_metric)
         if is_best:
             model.save_pretrained(str(save_dir / "best_model"))
-            print(f"  -> new best ic_ir_h5={ic_ir_str} val_ic={val_ic:.4f} (epoch {epoch+1}), saved.")
+            print(f"  -> new best ic_ir_h{ic_target_h}={ic_ir_str} val_ic={val_ic:.4f} (epoch {epoch+1}), saved.")
             _gdrive_sync(save_dir / "best_model", remote=remote_root)
             _gdrive_sync_logs(log_path, remote_root)
             if cfg.hf_repo and cfg.hf_revision_out:

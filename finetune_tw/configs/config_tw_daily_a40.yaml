@@ -1,0 +1,57 @@
+# RunPod A40 (48 GB VRAM) — /workspace/ is the persistent volume
+# Usage: python -m finetune_tw.train_tokenizer --config finetune_tw/configs/config_tw_daily_a40.yaml
+db_path: "/workspace/Kronos/finetune_tw/data/tw_stocks.db"
+lookback_window: 90
+predict_window: 10
+max_context: 512
+clip: 5.0
+train_end_date: "2023-12-31"
+val_end_date: "2024-06-30"
+
+tokenizer_epochs: 12
+basemodel_epochs: 20
+batch_size: 256
+save_steps: 500
+log_interval: 50
+tokenizer_lr: 0.0002
+predictor_lr: 0.00005
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_weight_decay: 0.1
+num_workers: 4
+persistent_workers: true
+prefetch_factor: 2
+train_steps_per_epoch: 1000
+val_steps_per_epoch: 200
+amp_dtype: "bf16"
+enable_tf32: true
+token_cache_enabled: true
+token_cache_dtype: "uint16"
+seed: 42
+
+early_stop_patience: 5
+ic_val_symbols: 150
+ic_val_dates: 40
+ic_target_horizon: 1
+fpt_freeze: true
+warmup_pct: 0.08
+warmup_div_factor: 25
+ranking_loss_alpha: 0.0
+ranking_loss_horizon: 5
+
+pretrained_tokenizer: "NeoQuasar/Kronos-Tokenizer-base"
+pretrained_predictor: "j835111/kronos-tw-finetune"
+hf_revision: "round-0"
+hf_tokenizer_revision: "round-0"
+hf_repo: "j835111/kronos-tw-finetune"
+hf_revision_out: "round-4"
+hf_checkpoint_revision_out: "checkpoints-round-4"
+hf_checkpoint_keep_last_n: 3
+exp_name: "tw_daily"
+output_dir: "/workspace/Kronos/finetune_tw/outputs"
+
+top_k: 10
+hold_days: 5
+pred_len: 10
+test_start_date: "2024-07-01"
+benchmark_symbol: "^TWII"

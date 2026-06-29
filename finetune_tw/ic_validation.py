@@ -193,6 +193,9 @@ def compute_validation_metrics_from_rows(
             cached_rows.append((pred_open, pred_open_t1, actual_open))
         cached_rows_by_date[date] = cached_rows
 
+    # IC formula: pred_open[h+1]/pred_open[0]-1 vs actual_open[h+1]/actual_open[0]-1
+    # Denominator = first predicted/actual open (t+1), matching the backtest signal exactly:
+    #   backtest ranks by pred_open[hold]/pred_open[0]-1; actual return = open[hold]/open[0]-1.
     val_ic = float("nan")
     if compute_ic:
         horizons = min(cfg.val_ic_horizons, cfg.pred_len - 1)
@@ -213,6 +216,8 @@ def compute_validation_metrics_from_rows(
         val_ic = mean_cross_sectional_ic(per_group)
 
     ic_ir = float("nan")
+    # target_horizon=1 → horizon_idx=0 → pred_open[1]/pred_open[0] vs actual_open[1]/actual_open[0]
+    # target_horizon=5 → horizon_idx=4 → pred_open[5]/pred_open[0] vs actual_open[5]/actual_open[0]
     max_horizon = min(target_horizon, cfg.pred_len - 1)
     if compute_ic_ir and max_horizon > 0:
         horizon_idx = max_horizon - 1
