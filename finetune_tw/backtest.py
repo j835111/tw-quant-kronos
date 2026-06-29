@@ -32,6 +32,11 @@ import matplotlib.ticker as mtick
 
 from model import Kronos, KronosTokenizer, KronosPredictor
 from finetune_tw.config import Config
+from finetune_tw.backtest_data import (
+    build_rebalance_inputs,
+    load_price_field_series,
+    load_symbol_history_frames,
+)
 from finetune_tw.db import query_symbol, list_symbols
 from finetune_tw.hf_utils import has_weights
 
@@ -264,25 +269,33 @@ def compute_raw_signals(
     """raw_preds[date_str][sym] = Series of predicted close returns, iloc[h-1] = h-day return."""
     BATCH_SIZE = 64
     raw_preds: dict[str, dict[str, pd.Series]] = {}
+    if rebal_dates.empty:
+        return raw_preds
+
+    lookback_start = (
+        rebal_dates.min() - pd.Timedelta(days=cfg.lookback_window * 2)
+    ).strftime("%Y-%m-%d")
+    history_frames = load_symbol_history_frames(
+        cfg.db_path,
+        symbols,
+        start=lookback_start,
+        end=rebal_dates.max().strftime("%Y-%m-%d"),
+    )
 
     for i, rebal_date in enumerate(rebal_dates):
         rebal_str = rebal_date.strftime("%Y-%m-%d")
-        lookback_start = (rebal_date - pd.Timedelta(days=cfg.lookback_window * 2)).strftime("%Y-%m-%d")
-        y_ts = pd.date_range(rebal_date, periods=pred_len, freq="B")
-
-        batch_syms, batch_dfs, batch_xts, batch_yts = [], [], [], []
-        for sym in symbols:
-            df = query_symbol(cfg.db_path, sym, start=lookback_start, end=rebal_str)
-            if len(df) < cfg.lookback_window:
-                continue
-            ctx = df.iloc[-cfg.lookback_window:]
-            ctx_df = ctx[["open", "high", "low", "close", "volume", "amount"]].reset_index(drop=True)
-            if ctx_df.isnull().any().any():
-                continue
-            batch_syms.append(sym)
-            batch_dfs.append(ctx_df)
-            batch_xts.append(pd.to_datetime(ctx["date"]).reset_index(drop=True))
-            batch_yts.append(pd.Series(y_ts))
+        cutoff = rebal_date - pd.Timedelta(days=cfg.lookback_window * 2)
+        recent_history_frames = {
+            symbol: frame.loc[frame.index >= cutoff]
+            for symbol, frame in history_frames.items()
+        }
+        batch_syms, batch_dfs, batch_xts, batch_yts = build_rebalance_inputs(
+            history_frames=recent_history_frames,
+            symbols=symbols,
+            rebal_date=rebal_date,
+            lookback_window=cfg.lookback_window,
+            pred_len=pred_len,
+        )
 
         date_preds: dict[str, pd.Series] = {}
         with torch.no_grad():
@@ -417,12 +430,13 @@ def run_backtest(cfg: Config, model_key: str, hold_days_list: list[int]) -> Path
     sys.stdout.flush()
 
     # Close prices for portfolio eval
-    close_prices: dict[str, pd.Series] = {}
-    for sym in symbols:
-        df = query_symbol(cfg.db_path, sym, start=cfg.test_start_date, end=test_end)
-        if len(df) > 0:
-            close_prices[sym] = pd.Series(df["close"].values,
-                                          index=pd.DatetimeIndex(df["date"]))
+    close_prices = load_price_field_series(
+        cfg.db_path,
+        symbols,
+        start=cfg.test_start_date,
+        end=test_end,
+        field="close",
+    )
     print(f"Loaded close prices: {len(close_prices)} symbols")
     sys.stdout.flush()
 
