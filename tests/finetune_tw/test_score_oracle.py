@@ -2,7 +2,6 @@ import numpy as np
 import pytest
 import torch
 from unittest.mock import MagicMock
-import pandas as pd
 
 
 def _make_fake_tokenizer(s1_bits=4, s2_bits=4):
@@ -21,45 +20,46 @@ def _make_fake_tokenizer(s1_bits=4, s2_bits=4):
     return tok, v_s1
 
 
-def _make_tuple_samples(n_samples=200, lookback=10, pred_len=6):
+def _make_pre_sliced_samples(n_samples=200, lookback=10, pred_len=6, vocab_size=16):
     total_steps = lookback + pred_len + 1
     samples = []
     rng = np.random.default_rng(0)
     for _ in range(n_samples):
         opens = 100 * np.cumprod(1 + rng.normal(0, 0.01, total_steps))
-        x = np.zeros((total_steps, 6), dtype=np.float32)
-        x[:, 0] = opens.astype(np.float32)
-        x[:, 3] = opens.astype(np.float32)
-        samples.append((torch.from_numpy(x), torch.zeros(total_steps, 5)))
+        samples.append(
+            {
+                "s1_ids": torch.randint(0, vocab_size, (lookback,), dtype=torch.long),
+                "open_prices": torch.tensor(opens, dtype=torch.float32),
+            }
+        )
     return samples
 
 
 def _make_dict_samples():
     return [
         {
-            "s1_ids": [0, 1, 2, 3],
-            "open_prices": [100.0, 101.0, 102.0, 105.0, 110.0, 115.0],
+            "s1_ids": torch.tensor([0, 1, 2], dtype=torch.long),
+            "open_prices": torch.tensor([100.0, 101.0, 102.0, 105.0, 110.0, 115.0], dtype=torch.float32),
         },
         {
-            "s1_ids": [4, 5, 2, 3],
-            "open_prices": [90.0, 92.0, 94.0, 96.0, 99.0, 102.0],
+            "s1_ids": torch.tensor([4, 5, 2], dtype=torch.long),
+            "open_prices": torch.tensor([90.0, 92.0, 94.0, 96.0, 99.0, 102.0], dtype=torch.float32),
         },
         {
-            "s1_ids": [7, 8, 9, 1],
-            "open_prices": [80.0, 81.0, 82.0, 83.0, 84.0, 90.0],
+            "s1_ids": torch.tensor([7, 8, 9], dtype=torch.long),
+            "open_prices": torch.tensor([80.0, 81.0, 82.0, 83.0, 84.0, 90.0], dtype=torch.float32),
         },
     ]
 
 
-def test_build_s1_oracle_from_tuple_samples_shape_and_type():
+def test_build_s1_oracle_from_samples_shape_and_type():
     from finetune_tw.score_oracle import build_s1_oracle_from_samples
 
-    tok, v_s1 = _make_fake_tokenizer(s1_bits=4)
-    dataset = _make_tuple_samples(n_samples=300, lookback=10, pred_len=6)
+    dataset = _make_pre_sliced_samples(n_samples=300, lookback=10, pred_len=6, vocab_size=16)
 
-    oracle = build_s1_oracle_from_samples(tok, dataset, lookback=10, horizon=5, min_count=5)
+    oracle = build_s1_oracle_from_samples(dataset, horizon=5, min_count=5, vocab_size=16)
 
-    assert oracle.shape == (v_s1,)
+    assert oracle.shape == (16,)
     assert oracle.dtype == torch.float32
     assert torch.isfinite(oracle).all()
 
@@ -67,14 +67,13 @@ def test_build_s1_oracle_from_tuple_samples_shape_and_type():
 def test_build_s1_oracle_from_raw_dict_samples_uses_mean_return():
     from finetune_tw.score_oracle import build_s1_oracle_from_samples
 
-    tok, _ = _make_fake_tokenizer(s1_bits=4)
     samples = _make_dict_samples()
 
-    oracle = build_s1_oracle_from_samples(tok, samples, lookback=3, horizon=2, min_count=2)
+    oracle = build_s1_oracle_from_samples(samples, horizon=2, min_count=2, vocab_size=16)
 
     expected = (((115.0 / 105.0) - 1.0) + ((102.0 / 96.0) - 1.0)) / 2.0
     assert oracle[2].item() == pytest.approx(expected, abs=1e-7)
-    assert oracle[1].item() == 0.0
+    assert oracle[9].item() == 0.0
 
 
 def test_build_s1_oracle_signature_accepts_raw_samples_in_db_path_slot():
@@ -117,57 +116,28 @@ def test_oracle_pred_score_differentiable():
 def test_oracle_tokens_with_few_samples_get_zero():
     from finetune_tw.score_oracle import build_s1_oracle_from_samples
 
-    tok, _ = _make_fake_tokenizer(s1_bits=4)
-    dataset = _make_tuple_samples(n_samples=1, lookback=10, pred_len=6)
+    dataset = _make_pre_sliced_samples(n_samples=1, lookback=10, pred_len=6, vocab_size=16)
 
-    oracle = build_s1_oracle_from_samples(tok, dataset, lookback=10, horizon=5, min_count=20)
+    oracle = build_s1_oracle_from_samples(dataset, horizon=5, min_count=20, vocab_size=16)
 
     assert oracle.abs().sum().item() == 0.0
 
 
-def test_build_s1_oracle_from_db_path_uses_exact_signature(tmp_path):
-    from finetune_tw.db import init_db, upsert_prices
-    from finetune_tw.score_oracle import build_s1_oracle
+def test_build_s1_oracle_from_samples_uses_exact_signature_with_default_vocab():
+    from finetune_tw.score_oracle import build_s1_oracle_from_samples
 
-    db_path = tmp_path / "oracle.db"
-    init_db(str(db_path))
-    dates = pd.bdate_range("2024-01-01", periods=8)
-    frame = pd.DataFrame(
+    samples = [
         {
-            "date": dates.strftime("%Y-%m-%d"),
-            "open": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0],
-            "high": [101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0],
-            "low": [99.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0],
-            "close": [100.5, 101.5, 102.5, 103.5, 104.5, 105.5, 106.5, 107.5],
-            "volume": [1000.0] * 8,
-            "amount": [100000.0] * 8,
-        }
-    )
-    upsert_prices(str(db_path), "AAA", frame)
+            "s1_ids": torch.tensor([10, 11, 12], dtype=torch.long),
+            "open_prices": torch.tensor([100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0], dtype=torch.float32),
+        },
+        {
+            "s1_ids": torch.tensor([20, 21, 12], dtype=torch.long),
+            "open_prices": torch.tensor([110.0, 111.0, 112.0, 113.0, 114.0, 115.0, 116.0, 117.0], dtype=torch.float32),
+        },
+    ]
 
-    tok = MagicMock()
-    tok.s1_bits = 4
+    oracle = build_s1_oracle_from_samples(samples, horizon=5, min_count=2)
 
-    def fake_encode(x, half=False):
-        _, time_steps, _ = x.shape
-        s1 = torch.arange(time_steps).unsqueeze(0)
-        s2 = torch.zeros((1, time_steps), dtype=torch.long)
-        return s1, s2
-
-    tok.encode = fake_encode
-
-    oracle = build_s1_oracle(
-        tok,
-        str(db_path),
-        start="2024-01-01",
-        end="2024-01-31",
-        lookback=3,
-        predict_window=3,
-        horizon=2,
-        clip=5.0,
-        seed=42,
-        min_count=2,
-    )
-
-    expected = (((105.0 / 103.0) - 1.0) + ((106.0 / 104.0) - 1.0)) / 2.0
-    assert oracle[2].item() == pytest.approx(expected, abs=1e-7)
+    assert oracle.shape == (1024,)
+    assert oracle.dtype == torch.float32

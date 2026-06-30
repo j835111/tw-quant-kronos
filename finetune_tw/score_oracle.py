@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from os import PathLike
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 import torch
@@ -47,35 +47,27 @@ def build_s1_oracle(
         samples = db_path
 
     return build_s1_oracle_from_samples(
-        tokenizer=tokenizer,
         samples=samples,
-        lookback=lookback,
         horizon=horizon,
         min_count=min_count,
+        vocab_size=2 ** int(tokenizer.s1_bits),
     )
 
 
-def build_s1_oracle_from_samples(
-    tokenizer,
-    samples: Iterable[Any],
-    lookback: int,
-    horizon: int,
-    min_count: int = 20,
-) -> torch.Tensor:
-    """Map each S1 token id to its mean open-to-open return at `horizon`."""
-    _validate_oracle_args(lookback=lookback, horizon=horizon, min_count=min_count)
+def build_s1_oracle_from_samples(samples, horizon, min_count, vocab_size=1024) -> torch.Tensor:
+    """Map pre-sliced S1 context ids to their mean open-to-open return at `horizon`."""
+    _validate_oracle_sample_args(horizon=horizon, min_count=min_count, vocab_size=vocab_size)
 
-    v_s1 = 2 ** int(tokenizer.s1_bits)
-    sums = torch.zeros(v_s1, dtype=torch.float64)
-    counts = torch.zeros(v_s1, dtype=torch.int64)
+    sums = torch.zeros(vocab_size, dtype=torch.float64)
+    counts = torch.zeros(vocab_size, dtype=torch.int64)
 
     for sample in samples:
-        parsed = _extract_sample_fields(sample=sample, tokenizer=tokenizer, lookback=lookback)
+        parsed = _extract_sample_fields(sample=sample)
         if parsed is None:
             continue
 
-        last_s1, open_prices = parsed
-        if last_s1 < 0 or last_s1 >= v_s1:
+        last_s1, open_prices, lookback = parsed
+        if last_s1 < 0 or last_s1 >= vocab_size:
             continue
 
         realized_return = _compute_open_to_open_return(
@@ -89,7 +81,7 @@ def build_s1_oracle_from_samples(
         sums[last_s1] += realized_return
         counts[last_s1] += 1
 
-    oracle = torch.zeros(v_s1, dtype=torch.float32)
+    oracle = torch.zeros(vocab_size, dtype=torch.float32)
     eligible = counts >= min_count
     if eligible.any():
         oracle[eligible] = (sums[eligible] / counts[eligible].to(torch.float64)).to(torch.float32)
@@ -119,6 +111,15 @@ def _validate_oracle_args(lookback: int, horizon: int, min_count: int) -> None:
         raise ValueError("min_count must be non-negative")
 
 
+def _validate_oracle_sample_args(horizon: int, min_count: int, vocab_size: int) -> None:
+    if horizon <= 0:
+        raise ValueError("horizon must be positive")
+    if min_count < 0:
+        raise ValueError("min_count must be non-negative")
+    if vocab_size <= 0:
+        raise ValueError("vocab_size must be positive")
+
+
 def _iter_db_samples(
     tokenizer,
     db_path: str,
@@ -142,7 +143,7 @@ def _iter_db_samples(
             normalized_window = _normalize_window(raw_window, lookback=lookback, clip=clip)
             s1_ids = _encode_s1_sequence(tokenizer, torch.from_numpy(normalized_window))
             yield {
-                "s1_ids": s1_ids.cpu(),
+                "s1_ids": s1_ids[:lookback].cpu(),
                 "open_prices": raw_window[:, 0].copy(),
             }
 
@@ -155,32 +156,22 @@ def _normalize_window(window: np.ndarray, lookback: int, clip: float) -> np.ndar
     return np.clip(normalized, -clip, clip).astype(np.float32, copy=False)
 
 
-def _extract_sample_fields(sample: Any, tokenizer, lookback: int) -> tuple[int, Any] | None:
+def _extract_sample_fields(sample: Any) -> tuple[int, Any, int] | None:
     if isinstance(sample, dict):
-        return _extract_from_mapping(sample=sample, tokenizer=tokenizer, lookback=lookback)
-    if isinstance(sample, (tuple, list)) and sample:
-        return _extract_from_tuple(sample=sample, tokenizer=tokenizer, lookback=lookback)
+        return _extract_from_mapping(sample=sample)
     return None
 
 
-def _extract_from_mapping(sample: dict[str, Any], tokenizer, lookback: int) -> tuple[int, Any] | None:
+def _extract_from_mapping(sample: dict[str, Any]) -> tuple[int, Any, int] | None:
     open_prices = _mapping_open_prices(sample)
     if open_prices is None:
         return None
 
     if "s1_ids" in sample:
         s1_ids = _as_1d_long_tensor(sample["s1_ids"])
-        if s1_ids.numel() < lookback:
+        if s1_ids.numel() < 1:
             return None
-        last_s1 = int(s1_ids[lookback - 1].item())
-        return last_s1, open_prices
-
-    for key in ("s1_id", "last_s1_id"):
-        if key in sample:
-            return int(sample[key]), open_prices
-
-    if "x" in sample:
-        return _extract_from_x(sample["x"], tokenizer=tokenizer, lookback=lookback)
+        return int(s1_ids[-1].item()), open_prices, int(s1_ids.numel())
 
     return None
 
