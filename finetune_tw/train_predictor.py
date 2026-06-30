@@ -447,6 +447,7 @@ def run_training(cfg: Config, max_steps: int = -1) -> None:
         print(f"  Loaded predictor from {cfg.pretrained_predictor}@{cfg.hf_revision}/predictor/best_model")
     else:
         model = Kronos.from_pretrained(cfg.pretrained_predictor).to(device)
+        print(f"  Loaded pretrained predictor from {cfg.pretrained_predictor}")
 
     # FPT selective freeze: freeze self_attn + ffn, train only LayerNorm + head
     if getattr(cfg, "fpt_freeze", False):

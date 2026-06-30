@@ -1,0 +1,60 @@
+# RunPod A40 (48 GB) — Round 5: pretrained restart + auxiliary ranking loss
+db_path: "/workspace/Kronos/finetune_tw/data/tw_stocks.db"
+lookback_window: 90
+predict_window: 10
+max_context: 512
+clip: 5.0
+train_end_date: "2023-12-31"
+val_end_date: "2024-06-30"
+
+tokenizer_epochs: 12
+basemodel_epochs: 20
+batch_size: 256
+save_steps: 500
+log_interval: 50
+tokenizer_lr: 0.0002
+predictor_lr: 0.00005
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_weight_decay: 0.1
+num_workers: 4
+persistent_workers: true
+prefetch_factor: 2
+train_steps_per_epoch: 1000
+val_steps_per_epoch: 200
+amp_dtype: "bf16"
+enable_tf32: true
+token_cache_enabled: true
+token_cache_dtype: "int32"
+seed: 42
+
+early_stop_patience: 5
+ic_val_symbols: 150
+ic_val_dates: 40
+ic_target_horizon: 5          # open-to-open IC-IR@h5 (matches backtest signal)
+fpt_freeze: false             # full fine-tuning from pretrained
+
+# Auxiliary ranking loss (new in Round 5)
+ranking_loss_alpha: 0.1       # weight of IC loss relative to CE loss
+ranking_loss_horizon: 5       # open[T+h+1]/open[T+1]-1 target horizon
+ranking_loss_every_n_steps: 5 # run ranking batch every N CE steps
+oracle_min_count: 20          # min samples per S1 token to include in oracle
+cross_sectional_batch_size: 64 # stocks per cross-sectional ranking batch
+
+# Pretrained restart (key change vs previous rounds)
+pretrained_tokenizer: "NeoQuasar/Kronos-Tokenizer-base"
+pretrained_predictor: "NeoQuasar/Kronos-base"
+hf_revision: ""               # empty = load pretrained directly (no fine-tuned revision)
+hf_tokenizer_revision: ""
+hf_repo: "j835111/kronos-tw-finetune"
+hf_revision_out: "round-5"
+hf_checkpoint_revision_out: "checkpoints-round-5"
+hf_checkpoint_keep_last_n: 3
+exp_name: "tw_daily"
+output_dir: "/workspace/Kronos/finetune_tw/outputs"
+
+top_k: 10
+hold_days: 5
+pred_len: 11                  # max_hold + 1 = 5 + 1, then +5 for open[T+h+1] buffer → use 11
+test_start_date: "2024-07-01"
+benchmark_symbol: "^TWII"

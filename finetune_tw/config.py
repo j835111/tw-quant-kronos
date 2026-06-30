@@ -39,8 +39,13 @@ class Config:
     ic_val_symbols: int = 150
     ic_val_dates: int = 8
     val_ic_horizons: int = 5
+    ic_target_horizon: int = 1
+    fpt_freeze: bool = False
     ranking_loss_alpha: float = 0.0
     ranking_loss_horizon: int = 5
+    ranking_loss_every_n_steps: int = 5
+    oracle_min_count: int = 20
+    cross_sectional_batch_size: int = 64
 
     # Model paths
     pretrained_tokenizer: str = "NeoQuasar/Kronos-Tokenizer-base"
