@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from types import SimpleNamespace
 
 import pandas as pd
@@ -8,21 +9,6 @@ import pandas as pd
 from finetune_tw.config import Config
 from finetune_tw.db import init_db, upsert_prices
 import pytest
-
-
-def _make_pred_signal(
-    returns: list[float],
-    high: list[float],
-    low: list[float],
-    close: list[float],
-) -> pd.Series:
-    signal = pd.Series(returns, dtype=float)
-    signal.attrs["pred_frame"] = pd.DataFrame(
-        {"high": high, "low": low, "close": close},
-        dtype=float,
-    )
-    return signal
-
 
 def _make_history_frame() -> pd.DataFrame:
     dates = pd.bdate_range("2024-01-01", periods=3)
@@ -327,51 +313,7 @@ def test_build_next_open_portfolio_returns_returns_empty_series_for_zero_executi
     assert daily_returns.empty
 
 
-def test_compute_atr_weights_basic():
-    import finetune_tw.backtest_next_open as bo
-
-    raw_preds = {
-        "LOW": _make_pred_signal([0.01, 0.02], high=[10.1, 10.1], low=[9.9, 9.9], close=[10.0, 10.0]),
-        "MID": _make_pred_signal([0.01, 0.02], high=[10.2, 10.3], low=[9.8, 9.7], close=[10.0, 10.0]),
-        "HIGH": _make_pred_signal([0.01, 0.02], high=[10.4, 10.6], low=[9.6, 9.4], close=[10.0, 10.0]),
-    }
-
-    weights = bo.compute_atr_weights(raw_preds, hold_days=2, selected_syms=["LOW", "MID", "HIGH"])
-
-    assert sum(weights.values()) == pytest.approx(1.0)
-    assert weights["LOW"] > weights["MID"] > weights["HIGH"]
-
-
-def test_compute_atr_weights_min_atr_clamp():
-    import finetune_tw.backtest_next_open as bo
-
-    raw_preds = {
-        "CLAMPED": _make_pred_signal([0.01], high=[10.0], low=[10.0], close=[10.0]),
-        "WIDE": _make_pred_signal([0.01], high=[10.03], low=[9.97], close=[10.0]),
-    }
-
-    weights = bo.compute_atr_weights(raw_preds, hold_days=1, selected_syms=["CLAMPED", "WIDE"])
-
-    assert weights["CLAMPED"] == pytest.approx(2.0 / 3.0)
-    assert weights["WIDE"] == pytest.approx(1.0 / 3.0)
-
-
-def test_compute_atr_weights_missing_sym():
-    import finetune_tw.backtest_next_open as bo
-
-    raw_preds = {
-        "KNOWN": _make_pred_signal([0.01], high=[10.05], low=[9.95], close=[10.0]),
-    }
-
-    weights = bo.compute_atr_weights(raw_preds, hold_days=1, selected_syms=["KNOWN", "MISSING"])
-
-    assert sum(weights.values()) == pytest.approx(1.0)
-    assert weights["KNOWN"] == pytest.approx(100.0 / 101.0)
-    assert weights["MISSING"] == pytest.approx(1.0 / 101.0)
-
-
-
-def test_compute_raw_signals_open_bulk_preloads_once_and_keeps_pred_frame(monkeypatch):
+def test_compute_raw_signals_open_bulk_preloads_once_and_returns_open_returns(monkeypatch):
     import finetune_tw.backtest_next_open as bo
 
     cfg = Config(
@@ -428,13 +370,11 @@ def test_compute_raw_signals_open_bulk_preloads_once_and_keeps_pred_frame(monkey
         rebal_dates,
         pred_len=3,
         symbols=symbols,
-        attach_pred_frame=True,
     )
 
     assert preload_calls == [("unused.db", tuple(symbols), "2023-12-30", "2024-01-04")]
-    pred_frame = raw_preds["2024-01-03"]["1101.TW"].attrs["pred_frame"]
-    assert list(pred_frame.columns) == ["high", "low", "close"]
-    assert list(pred_frame.iloc[0]) == pytest.approx([10.5, 9.5, 10.0])
+    assert raw_preds["2024-01-03"]["1101.TW"].tolist() == pytest.approx([0.03, 0.06])
+    assert "pred_frame" not in raw_preds["2024-01-03"]["1101.TW"].attrs
 
 
 def test_compute_raw_signals_open_applies_per_rebalance_recency_cutoff(monkeypatch):
@@ -597,7 +537,6 @@ def test_run_backtest_next_open_saves_suffix_outputs_and_schema(tmp_path, monkey
         signal_dates,
         pred_len,
         symbols,
-        attach_pred_frame=False,
     ):
         assert seen_cfg is cfg
         assert list(signal_dates.strftime("%Y-%m-%d")) == ["2024-01-02", "2024-01-05"]
@@ -634,93 +573,6 @@ def test_run_backtest_next_open_saves_suffix_outputs_and_schema(tmp_path, monkey
     }
     variant = data["hold_variants"]["2"]
     assert len(variant["dates"]) == len(variant["daily_returns"])
-
-
-def test_run_backtest_next_open_passes_atr_weights_when_enabled(tmp_path, monkeypatch):
-    import finetune_tw.backtest_next_open as bo
-
-    db_path = _seed_runner_db(tmp_path)
-    cfg = Config(
-        db_path=db_path,
-        benchmark_symbol="^TWII",
-        test_start_date="2024-01-01",
-        output_dir=str(tmp_path / "outputs"),
-        exp_name="next_open_case_atr",
-        top_k=2,
-        min_signal_threshold=0.0,
-    )
-
-    monkeypatch.setattr(
-        bo,
-        "build_model_specs",
-        lambda _cfg: {
-            "round0": SimpleNamespace(label="Round 0"),
-        },
-    )
-    monkeypatch.setattr(bo, "load_predictor_from_spec", lambda spec, _cfg: object())
-    monkeypatch.setattr(bo, "_today", lambda: pd.Timestamp("2024-01-09"))
-    monkeypatch.setattr(
-        bo,
-        "compute_metrics",
-        lambda dr: {"annualised_return": 0.0, "sharpe": 0.0, "max_drawdown": 0.0},
-    )
-    monkeypatch.setattr(
-        bo,
-        "plot_backtest_next_open_results",
-        lambda data, out_dir: out_dir / "backtest_round0_next_open.png",
-    )
-    monkeypatch.setattr(
-        bo,
-        "compute_raw_signals",
-        lambda predictor, seen_cfg, signal_dates, pred_len, symbols, attach_pred_frame=False: {
-            "2024-01-02": {
-                "1101.TW": _make_pred_signal(
-                    [0.02, 0.03],
-                    high=[10.1, 10.1],
-                    low=[9.9, 9.9],
-                    close=[10.0, 10.0],
-                ),
-                "1216.TW": _make_pred_signal(
-                    [0.01, 0.015],
-                    high=[20.4, 20.6],
-                    low=[19.6, 19.4],
-                    close=[20.0, 20.0],
-                ),
-            },
-        },
-    )
-    monkeypatch.setattr(
-        bo,
-        "signals_to_holdings",
-        lambda raw_preds, signal_dates, hold_days, top_k, threshold: [
-            {"1101.TW", "1216.TW"} for _ in signal_dates
-        ],
-    )
-
-    def fake_build_next_open_portfolio_returns(
-        price_frames,
-        holdings_sequence,
-        execution_dates,
-        trading_dates,
-        weights=None,
-    ):
-        assert list(execution_dates.strftime("%Y-%m-%d")) == ["2024-01-03", "2024-01-08"]
-        assert weights is not None
-        first_weights = weights["2024-01-03"]
-        assert sum(first_weights.values()) == pytest.approx(1.0)
-        assert first_weights["1101.TW"] > first_weights["1216.TW"]
-        second_weights = weights["2024-01-08"]
-        assert second_weights == pytest.approx({"1101.TW": 0.5, "1216.TW": 0.5})
-        daily = pd.Series([0.0], index=pd.DatetimeIndex([execution_dates[0]]))
-        return pd.Series(dtype=float), daily
-
-    monkeypatch.setattr(
-        bo,
-        "build_next_open_portfolio_returns",
-        fake_build_next_open_portfolio_returns,
-    )
-
-    bo.run_backtest_next_open(cfg, "round0", [2], use_atr_weights=True)
 
 
 def test_run_backtest_next_open_uses_exact_variant_schedule_for_non_multiple_holds(
@@ -769,7 +621,6 @@ def test_run_backtest_next_open_uses_exact_variant_schedule_for_non_multiple_hol
         signal_dates,
         pred_len,
         symbols,
-        attach_pred_frame=False,
     ):
         assert seen_cfg is cfg
         assert list(signal_dates.strftime("%Y-%m-%d")) == ["2024-01-02", "2024-01-08"]
@@ -843,7 +694,7 @@ def test_run_backtest_next_open_raises_when_variant_has_no_realized_daily_return
     monkeypatch.setattr(
         bo,
         "compute_raw_signals",
-        lambda predictor, seen_cfg, signal_dates, pred_len, symbols, attach_pred_frame=False: {
+        lambda predictor, seen_cfg, signal_dates, pred_len, symbols: {
             d.strftime("%Y-%m-%d"): {
                 sym: pd.Series([0.01] * pred_len) for sym in symbols
             }
@@ -876,3 +727,24 @@ def test_run_backtest_next_open_raises_when_variant_has_no_realized_daily_return
         match=r"No realized daily returns for top_k=1 hold_days=2",
     ):
         bo.run_backtest_next_open(cfg, "round0", [2])
+
+
+def test_main_rejects_removed_atr_weights_flag(monkeypatch, capsys):
+    import finetune_tw.backtest_next_open as bo
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "backtest_next_open",
+            "--model",
+            "round0",
+            "--atr-weights",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        bo.main()
+
+    assert excinfo.value.code == 2
+    assert "unrecognized arguments: --atr-weights" in capsys.readouterr().err
