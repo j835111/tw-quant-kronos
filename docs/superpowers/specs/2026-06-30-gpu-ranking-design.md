@@ -117,6 +117,21 @@ The following remain unchanged:
 - Existing config/YAML fields
 - Returned batch keys and tensor dtypes expected by tests
 
+## Behavioral Parity
+
+The implementation target is behavioral parity for existing public outputs and existing test expectations, with two explicit exceptions that are treated as bug fixes rather than compatibility breaks:
+
+1. `grad_accum_steps` will begin working as configured, instead of stepping the optimizer every iteration.
+2. Cross-sectional date sampling will use real tradable dates instead of calendar business days, so seeded sampling may choose a different valid date if a previous seed would have landed on a non-trading weekday.
+
+Outside of those two corrections, the refactor is intended to preserve:
+
+- function signatures
+- config compatibility
+- output dictionary structure
+- tensor shapes and dtypes
+- oracle numeric behavior for the same effective samples
+
 ## Testing Plan
 
 Add or update tests to verify:
