@@ -1148,6 +1148,16 @@ Task 5 (raw technical features) and Task 6 (`layer_indices` selection) are both 
 
 - [ ] **Step 2: Extract embeddings for train/val/test windows**
 
+**Known bottleneck (measured 2026-07-02 on an A40 pod): the per-date extraction loop in `build_embedding_dataset` is CPU-bound, not GPU-bound.** `nvidia-smi` showed 0% GPU utilization with a single Python process pegged at 100% of one core (of 96 available) — the per-date pandas slicing in `build_rebalance_inputs` is single-threaded and never lets the GPU forward pass become the bottleneck. Sequential single-process extraction over the full 2015-2023 history was estimated at ~54h on CPU-only and ~5.5h on a single GPU process. Splitting the date range into N independent CLI invocations (no code changes — `extract_embeddings.py`'s `--start`/`--end`/`--out` args already support this) run in parallel as separate OS processes pushes GPU utilization to 100% (measured: 8 concurrent processes, 32GB/46GB VRAM on an A40, ~8x wall-clock speedup, near-linear). Use `scripts/run_round6_parallel.sh` (already written) instead of two plain sequential CLI calls:
+
+```bash
+bash scripts/run_round6_parallel.sh
+```
+
+That script runs Steps 2–4 together: 8-way parallel train extraction (`2015-01-01`→`2023-12-31` split into 8 contiguous ranges) → merge to `/root/embeddings_train.parquet`, 4-way parallel val extraction (`2024-01-01`→`2024-06-30` split into 4 ranges) → merge to `/root/embeddings_val.parquet`, then Steps 3–4 below unchanged. It assumes it's run from `/root/Kronos` with the DB already at `finetune_tw/data/tw_stocks.db` and hardcodes `/root/...` output paths — adjust those paths if running somewhere other than a freshly cloned `/root/Kronos` on a pod. Step 4 (backtest) is **not** parallelized this way yet — it's a much smaller workload (~100 signal dates vs. ~2477 extraction dates) so it was left sequential, but the same technique would apply if it ever becomes the bottleneck.
+
+Original sequential form (kept for reference / smaller-scale runs where parallelizing isn't worth the complexity):
+
 ```bash
 python -m finetune_tw.extract_embeddings --config finetune_tw/configs/config_tw_daily.yaml \
     --model pretrained --start 2015-01-01 --end 2023-12-31 --horizon 5 \
