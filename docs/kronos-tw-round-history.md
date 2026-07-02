@@ -355,6 +355,77 @@ Benchmark ^TWII：Sharpe=1.47，Ann=41.24%
 
 ---
 
+## Round 6 — 2026-07-02（Kronos Embedding + XGBoost LambdaRankIC，M1）
+
+**起點：** `NeoQuasar/Kronos-base`（**完全凍結，從未 fine-tune**）
+**平台：** RunPod A40 48GB（SECURE cloud, $0.44/hr）
+**Branch：** `research/round-6-m1-embedding`
+**Plan：** `docs/superpowers/plans/2026-07-02-kronos-embedding-xgb-lambdarank.md`
+
+**戰略背景：** Round 1–5 全部證實「fine-tune Kronos-base」這條路系統性失敗（文獻 arXiv:2511.18578 佐證：pretrained TSFM 在金融回報預測的 fine-tuning 情境下架構性失敗，不是超參數問題）。M1 改用完全不同的路徑：**凍結 Kronos，只當特徵抽取器，用 XGBoost 在其 hidden state 上直接學排序**，理論上繞開 catastrophic forgetting 與 fine-tuning 退化問題。
+
+**驗證的方法：**
+- ✅ **凍結 embedding 抽取**：`extract_embeddings.py`，mean-pool 最後一層 hidden state（Kronos-base 實際 `d_model=832`），加上 4 個 raw 技術指標（MA5/MA20 distance, 10日動量, volume ratio）
+- ✅ **LambdaRankIC objective**：自行推導的 LambdaRank pairwise 目標函數，用 label rank 距離取代標準 LambdaRank 的 NDCG gain 項，逼近直接優化 Spearman Rank-IC（非逐字照抄 arXiv:2605.00501，是我方推導）
+- ✅ **全母體驗證**：不像 Round 0-5 用抽樣驗證集（150-500 symbols），這裡驗證集是完整 130 天 × ~1039 檔股票，噪音低很多
+
+**資料規模：**
+- 訓練集：2015-01-01 → 2023-12-31，2,141,404 筆（2246 個交易日 × ~1039 檔股票）
+- 驗證集：2024-01-01 → 2024-06-30，135,323 筆
+- 測試集：2024-07-01 → 2026-07-02（97 個訊號日，hold=5d 間隔）
+
+**工程筆記（重要，供未來大規模跑類似任務參考）：**
+1. `extract_embeddings.py` 逐日迴圈是 **CPU 單執行緒瓶頸**，GPU 使用率 0%——改成把日期切成多段、各自獨立 CLI process 平行跑，GPU 衝到 100%，速度提升近 8 倍
+2. 8-way 平行會撞到 pod 的 **50GB RAM cgroup 上限**（container 裡 `top`/`free` 看不出真實上限，需查 `/sys/fs/cgroup/memory/memory.limit_in_bytes`），單一 worker 隨進度累積記憶體可達 25GB。改成切更細（每段再折半）+ 3 併發才穩定
+3. XGBoost 訓練階段 `pd.read_parquet` 讀 11GB 的合併訓練集會**膨脹到 42.7GB**（近 4 倍），逼近上限——改用 `pyarrow.ParquetFile.iter_batches()` 串流讀取到預先配置好的 numpy array，避開 pandas 整表 materialize 的記憶體開銷
+4. 詳細記錄於 memory `runpod_training.md`
+
+### 訓練歷程（XGBoost，非 epoch 制）
+
+| Round | val-rank_ic | 備注 |
+|-------|------------|------|
+| 0 | 0.0406 | |
+| 50 | 0.0568 | |
+| 100 | 0.0631 | |
+| **190** | **0.0665** | ← **Best（best_iteration=190）** |
+| 199 | 0.0663 | 訓練上限（num_boost_round=200），early stop 未觸發 |
+
+驗證集 IC 全程單調上升（僅 round 140 有一次微幅回落），最終 val-rank_ic ≈ 0.066——**顯著高於 Round 0-5 在 h5 量到的 IC**（Pretrained 0.0268、Round 0 0.0319、Round 5 val_ic ~0.02-0.03），且因為是全母體計算，統計上比抽樣估計可信得多。
+
+### 回測結果（open/open v2，top_k=10，hold=5d）
+
+| 指標 | Round 6 (M1) | Round 0（基準 1.12） | 差距 |
+|------|-------------|---------------------|------|
+| **Sharpe** | **0.340** | **1.12** | **−0.78** |
+| **Ann** | **5.52%** | **38.59%** | **−33.1%** |
+| **MaxDD** | 30.29% | 35.03% | +4.7%（略優）|
+
+### 失敗分析
+
+**逐季拆解後（2026-07-02 事後分析），頭條數字的落差主要來自單一季度，而非全程劣勢：**
+
+| 期間 | Round 0 | Round 6 | ^TWII |
+|------|--------|--------|-------|
+| 2024-07 ~ 2026-03（前 7 個季度） | Sharpe 0.63 / Ann +16.7% | Sharpe 0.48 / Ann +9.2% | — |
+| **2026-Q2（單季）** | **+43.9%（Sharpe 3.67）** | **−4.3%（Sharpe −0.59）** | **+40.5%** |
+
+兩策略日報酬相關性 0.678（持股大量重疊），排除 2026-Q2 後差距是 0.63 vs 0.48 的溫和劣勢——不是 1.12 vs 0.34 的慘敗。**決定性差異在 2026-Q2：台股大盤單季 +40.5% 的動能行情裡，Round 0 完整吃到（+43.9%），Round 6 這個 long-only、每期 10 檔的組合竟然虧錢（−4.3%）**——代表它挑的股票跟行情完全反向。
+
+1. **模型「本性」不同 → regime 依賴**（主因）：Kronos autoregressive 預測天生是趨勢外推，動能行情自然跟上；XGBoost + rank-IC 學的是 2015-2023 台股截面歷史規律，很可能學出偏**均值回歸／反轉因子**的模型（歷史上截面反轉在台股統計上最穩定，LambdaRankIC 的 rank-distance gain 又強化極端排序）。反轉因子在動能主導的軋空行情正是被屠殺最慘的一類——大盤 +40% 還虧錢就是「一直買預期反彈的落後股，行情卻集中在持續衝高的強勢股」的典型症狀
+2. **驗證集 IC 高 ≠ 回測表現好，這次有了更具體的機制解釋**：(a) IC 量的是**全體 1039 檔的平均排序相關性**，策略只買 top 10（前 1%）——中段排得好可以撐高 IC，但獲利完全取決於尾端極值；(b) IC 是平均截面能力，**不衡量 regime 穩健性**——驗證期（2024H1）反轉規律有效所以 IC 高，動能行情一來同一個模型直接反噬。Round 5（val ic_ir_h5=0.47 但 Sharpe 0.98）是同一模式的前奏
+3. **驗證期只涵蓋單一 regime**：early stopping 用 2024H1 一種行情選 best_iteration，把模型鎖定在那個 regime 的截面規律上
+4. **連帶發現：Round 0 的 1.12 基準本身也要重新審視**——它有很大一塊是 2026-Q2 單季貢獻（排除後只剩 Sharpe 0.63），某種程度上是「賭對了一個動能行情」，穩健性沒有頭條數字看起來高
+5. **凍結 embedding 假設仍未獲驗證，但排序更後面了**：mean-pooling 可能抹掉時間局部訊號、LambdaRankIC 可調參（`sigma`、gain 形式）、embedding vs raw features 的貢獻拆解（`layer_indices` 消融已實作未測）都還沒做——但在解決 regime 依賴之前，這些微調的預期收益有限
+
+**對下一步的含義：** 問題的形狀從「M1 架構不行」變成「特徵/標籤缺乏動能資訊 + 驗證期單一」。最便宜的確認實驗：算出**測試期的逐期 IC**（不只驗證期），看 Round 6 的 IC 是否在 2026-Q2 翻負——若是，即確認 regime 依賴診斷。修正方向：加動能類特徵讓 XGBoost 有能力表達趨勢行情、用多段不同 regime 的驗證期做 early stopping、或 ensemble Kronos 訊號（動能性）與 XGBoost 訊號（反轉性）。
+
+**參考資料：**
+- `docs/superpowers/plans/2026-07-02-kronos-embedding-xgb-lambdarank.md`
+- `finetune_tw/extract_embeddings.py`, `finetune_tw/lambdarank_ic.py`, `finetune_tw/train_xgb_lambdarank.py`, `finetune_tw/backtest_xgb_embedding.py`
+- `finetune_tw/outputs/tw_daily/backtest_returns_xgb_embedding_next_open.json`（pod 上）/ `backtest_returns_round6_next_open.json`（本地）
+
+---
+
 ## 各輪 Sharpe 彙整（open/open v2，top_k=10，hold=5d）
 
 | 版本 | Sharpe | Ann | MaxDD | 備注 |
@@ -366,6 +437,7 @@ Benchmark ^TWII：Sharpe=1.47，Ann=41.24%
 | Round 3 | 0.50 | 20% | 41% | open IC，大幅退步 |
 | Round 4 | 1.24 | 46% | 34% | FPT + IC-IR@h1，輸 Round 0 |
 | Round 5 | 0.98 | 31.79% | 39.86% | Pretrained 重啟 + Ranking Loss，仍輸 Round 0 |
+| Round 6 | 0.34 | 5.52% | 30.29% | Kronos Embedding + XGBoost LambdaRankIC（M1）；主因錯過 2026-Q2 動能行情（該季 −4.3% vs R0 +43.9%），排除該季後為 0.48 vs 0.63 |
 
 ---
 
@@ -373,7 +445,7 @@ Benchmark ^TWII：Sharpe=1.47，Ann=41.24%
 
 **Round 0 仍是目前唯一可執行的版本（Sharpe 1.12，新基準）。**
 
-已窮盡所有已知方向（截至 2026-07-01）：
+已窮盡所有已知方向（截至 2026-07-02）：
 - 重訓（Round 1-5）：全部退步，Round 0 是目前上限
 - 策略參數（ATR sizing、volume filter）：no-op
 - Stacking / MC ensemble：有害
@@ -381,21 +453,24 @@ Benchmark ^TWII：Sharpe=1.47，Ann=41.24%
 - Label Horizon 掃描：IC-IR 從 h=1 單調衰減，換 hold_days 無效
 - FPT freeze（Round 4）：best epoch=1
 - Pretrained 重啟 + Auxiliary Ranking Loss（Round 5）：Sharpe 0.98，退步
+- **凍結 Kronos + XGBoost LambdaRankIC（Round 6 / M1）：Sharpe 0.34**——但逐季拆解後，主因是錯過 2026-Q2 動能行情（大盤 +40.5% 該季 R6 虧 4.3%），排除該季後為 0.48 vs 0.63 的溫和劣勢，不是全程慘敗
 
-### 戰略轉向（autoresearch 260701）
+**Round 6 之後的思考（含逐季拆解後的修正）：** 連續兩輪（Round 5、Round 6）都出現「驗證集指標創新高，但回測 Sharpe 不升反降」的模式。Round 6 的事後分析給出了比「評估落差」更具體的機制：
+1. **Regime 依賴是主因**：XGBoost + rank-IC 從 2015-2023 歷史學到的截面規律偏反轉性質，在動能主導的行情（2026-Q2 大盤單季 +40.5%）直接反噬；Kronos autoregressive 預測天生趨勢外推，反而吃到這波。「驗證集 IC 高但回測差」的機制 = IC 量的是全體平均排序（策略只買 top 1%）+ IC 不衡量 regime 穩健性
+2. **Round 0 基準的穩健性也要打折**：1.12 有很大一塊是 2026-Q2 單季貢獻（排除後 0.63），它某種程度上是「賭對了動能行情」
+3. **先做便宜的診斷實驗再上大規模訓練**：例如算出測試期的逐期 IC，確認 Round 6 的 IC 是否在 2026-Q2 翻負
 
-文獻（arXiv:2511.18578，20 億筆全球股市資料）確認：**pretrained TSFM fine-tuning 在金融回報預測上系統性失敗**。這不是超參數問題，是架構性問題。
+**未驗證的 M1 後續方向（按逐季拆解後的新優先順序）：**
+1. **測試期逐期 IC 診斷**（最便宜，先做）：確認 regime 依賴假說——若 2026-Q2 的 IC 翻負即證實
+2. **加動能類特徵**：目前 4 個技術指標只有 momentum_10 一個動能項，模型幾乎沒有表達趨勢行情的能力；擴充動能特徵組（多時間尺度動量、52週高點距離等）
+3. **多 regime 驗證期**：early stopping 不要只用 2024H1 單一窗口，改用多段不同性質行情的組合
+4. **Ensemble Kronos（動能性）+ XGBoost（反轉性）訊號**：兩者相關性 0.678，性質互補，混合可能比單用任一個穩健
+5. **Round 0 embedding 對照 / `layer_indices` 消融 / raw-feature-only 對照**：原計畫的消融實驗，優先度降低——在解決 regime 依賴之前，這些微調的預期收益有限
 
-**新方向（全新，從未嘗試）：**
-
-| 優先 | 方向 | 核心機制 | 工程量 | 信心 |
-|------|------|---------|--------|------|
-| 🔴 M1 | **Kronos Embedding + LambdaRankIC (XGBoost)** | 凍結 Kronos → 提取 last-layer hidden states → XGBoost with LambdaRankIC loss | 1-2 天 | HIGH |
-| 🟠 N1 | **L2-SP 正則化** | fine-tuning loss 加 λ‖θ-θ₀‖²，限制偏離 pretrained | 2 小時 | MEDIUM |
-| 🟠 N2 | **MoFO Optimizer** | 只更新動量最大參數，其他凍結，比 FPT 更靈活 | 4-6 小時 | MEDIUM |
-| 🔵 N3 | **SSPT 台股持續預訓練** | 股票分類 + 產業分類 + MA 預測（KDD 2025 方法）| 3-5 天 | LOW-MEDIUM |
-
-**詳細計劃**：`autoresearch/improve-260701-1512/improvement-plan.md`
+**若要回到 fine-tuning 路線，可考慮的未驗證方向：**
+1. **更大的驗證集 + 更長訓練**：val 集 150×40 可能太小，導致 ic_ir 估計噪音大、early stop 不穩定
+2. **Ranking loss 調參**：`ranking_loss_alpha` 從 0.1 調低（如 0.01），減少對 token prediction 的干擾
+3. **不同 ranking loss 形式**：ListMLE vs. pairwise hinge loss；或直接在 test set dates 上對齊 oracle
 
 ---
 
@@ -420,6 +495,7 @@ Benchmark ^TWII：Sharpe=1.47，Ann=41.24%
 | MC ensemble（mc_mean）| — | 獨立實驗 | ❌ 有害（Sharpe 1.07 < benchmark 1.60）|
 | Pretrained 重啟（從 Kronos-base）| — | Round 5 | ❌ 必要但不充分；重啟後 val_loss 起點 2.93，但回測仍輸 Round 0 |
 | Auxiliary Ranking Loss（ListMLE, alpha=0.1）+ Pretrained 重啟 | 260622 N1, 260626 N1, 260629 N1 | Round 5 | ❌ val ic_ir_h5=0.47 但 Sharpe 0.98，ranking loss 未轉化為回測改善；alpha=0.1 對 token CE 有輕微干擾（val_loss 緩升） |
+| Kronos Embedding + XGBoost LambdaRankIC（凍結 Kronos，繞開 fine-tuning）| 260701 M1 | Round 6 | ❌ val-rank_ic 創新高（0.066，全母體）但 Sharpe 僅 0.34；逐季拆解=主因錯過 2026-Q2 動能行情，排除後 0.48 vs 0.63 |
 
 ### 未驗證（autoresearch 有記錄，從未測試）
 
@@ -439,11 +515,11 @@ Benchmark ^TWII：Sharpe=1.47，Ann=41.24%
 
 ---
 
-### 全新架構方向（autoresearch 260701，從未嘗試）
+### 全新架構方向（autoresearch 260701）
 
 | 方法 | 來源 | 優先度 | 說明 |
 |------|------|--------|------|
-| **Kronos Embedding → XGBoost + LambdaRankIC** | arXiv:2605.00501 | 🔴 最高 | 凍結 Kronos-base，提取 hidden states（512d），用 XGBoost 搭配 LambdaRankIC 直接優化 Rank IC。低 SNR 環境（我們的 IC~0.04）下一致優於 regression/ListMLE。**完全繞過 fine-tuning 問題** |
+| ~~**Kronos Embedding → XGBoost + LambdaRankIC**~~ | arXiv:2605.00501 | ✅ 已於 Round 6 驗證 | ❌ Sharpe 0.34；hidden state 實際為 832d（非 512d）。詳見 Round 6 章節的逐季拆解分析 |
 | **L2-SP 正則化（L2 距離 pretrained weights）** | arXiv:2603.18596 | 🟡 高 | fine-tuning loss 加 `λ‖θ-θ₀‖²`，防止偏離 pretrained landscape。比 EWC 更簡單（不需 Fisher matrix） |
 | **MoFO Optimizer** | arXiv:2407.20999 | 🟡 高 | 只更新動量幅度最大的 top-K% 參數；其他參數凍結。無需 pretrained 資料、無需 Fisher 估計，比 FPT 更動態 |
 | **SSPT 台股持續預訓練（股票分類 + 產業分類 + MA）** | arXiv:2506.16746, KDD 2025 | 🟠 中 | 先以台股資料做自監督預訓練，讓 Kronos 了解台股身份後再 fine-tune predictor |

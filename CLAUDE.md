@@ -8,6 +8,21 @@ Kronos is a decoder-only foundation model for financial K-line (candlestick) seq
 
 Published at AAAI 2026. Models are hosted on HuggingFace under `NeoQuasar/`.
 
+## Branch Strategy
+
+| 前綴 | 用途 | 合併回 master？ |
+|------|------|----------------|
+| `research/round-N` | 訓練實驗（config、loss、early stop 策略） | ❌ 保留，不合併 |
+| `research/NAME` | 其他探索性實驗（ensemble、新架構） | ❌ 保留，不合併 |
+| `feature/NAME` | 工具、基礎建設、backtest 腳本改進 | ✅ 合併 |
+| `fix/NAME` | Bug fix | ✅ 合併 |
+
+**規則：**
+- `research/` 分支永遠不合併回 master，用 `git log --oneline research/round-N` 保留完整歷史
+- 實驗結果記錄在 `autoresearch/tw-evals/finetune-tw-results.tsv` 和 `docs/kronos-tw-round-history.md`（這兩個文件在 master 上更新）
+- `feature/` 和 `fix/` 完工後合併，刪除分支
+- 結束一個 `research/` 分支前，先確認 TSV 和 round-history 已在 master 更新，再開下一輪
+
 ## Commands
 
 ### Install
