@@ -382,10 +382,20 @@ Benchmark ^TWII：Sharpe=1.47，Ann=41.24%
 - FPT freeze（Round 4）：best epoch=1
 - Pretrained 重啟 + Auxiliary Ranking Loss（Round 5）：Sharpe 0.98，退步
 
-**若要繼續提升，可考慮的未驗證方向：**
-1. **更大的驗證集 + 更長訓練**：val 集 150×40 可能太小，導致 ic_ir 估計噪音大、early stop 不穩定
-2. **Ranking loss 調參**：`ranking_loss_alpha` 從 0.1 調低（如 0.01），減少對 token prediction 的干擾
-3. **不同 ranking loss 形式**：ListMLE vs. pairwise hinge loss；或直接在 test set dates 上對齊 oracle
+### 戰略轉向（autoresearch 260701）
+
+文獻（arXiv:2511.18578，20 億筆全球股市資料）確認：**pretrained TSFM fine-tuning 在金融回報預測上系統性失敗**。這不是超參數問題，是架構性問題。
+
+**新方向（全新，從未嘗試）：**
+
+| 優先 | 方向 | 核心機制 | 工程量 | 信心 |
+|------|------|---------|--------|------|
+| 🔴 M1 | **Kronos Embedding + LambdaRankIC (XGBoost)** | 凍結 Kronos → 提取 last-layer hidden states → XGBoost with LambdaRankIC loss | 1-2 天 | HIGH |
+| 🟠 N1 | **L2-SP 正則化** | fine-tuning loss 加 λ‖θ-θ₀‖²，限制偏離 pretrained | 2 小時 | MEDIUM |
+| 🟠 N2 | **MoFO Optimizer** | 只更新動量最大參數，其他凍結，比 FPT 更靈活 | 4-6 小時 | MEDIUM |
+| 🔵 N3 | **SSPT 台股持續預訓練** | 股票分類 + 產業分類 + MA 預測（KDD 2025 方法）| 3-5 天 | LOW-MEDIUM |
+
+**詳細計劃**：`autoresearch/improve-260701-1512/improvement-plan.md`
 
 ---
 
@@ -408,20 +418,32 @@ Benchmark ^TWII：Sharpe=1.47，Ann=41.24%
 | Extended Warmup（pct=0.08, div=25）| 260629 M3 | Round 4 | ❌ 對退化無效 |
 | Stacking（LightGBM，MC=5/10）| — | 獨立實驗 | ❌ 有害（-0.20 Sharpe），已移除 |
 | MC ensemble（mc_mean）| — | 獨立實驗 | ❌ 有害（Sharpe 1.07 < benchmark 1.60）|
+| Pretrained 重啟（從 Kronos-base）| — | Round 5 | ❌ 必要但不充分；重啟後 val_loss 起點 2.93，但回測仍輸 Round 0 |
+| Auxiliary Ranking Loss（ListMLE, alpha=0.1）+ Pretrained 重啟 | 260622 N1, 260626 N1, 260629 N1 | Round 5 | ❌ val ic_ir_h5=0.47 但 Sharpe 0.98，ranking loss 未轉化為回測改善；alpha=0.1 對 token CE 有輕微干擾（val_loss 緩升） |
 
 ### 未驗證（autoresearch 有記錄，從未測試）
 
 | 方法 | 來源計劃 | 優先度 | 說明 |
 |------|---------|--------|------|
 | **Close-to-close IC-IR@h1 early stopping** | 260629 M2 | 🔴 高 | Round 4 用的是 open-to-open h1；close 版 SNR=0.64 從未測試。**需配合 pretrained 重啟** |
-| **Auxiliary Ranking Loss（Pairwise IC loss）** | 260622 N1, 260626 N1, 260629 N1 | 🔴 高 | 三份計劃都有，文獻最強（arxiv:2510.14156, 2509.10461）。直接優化截面排名而非 token CE。**需改 DataLoader 按日期分組 batch**，需配合 pretrained 重啟才有學習空間 |
+| **Ranking loss 調參（alpha=0.01）或改用 pairwise hinge loss** | — | 🟡 中 | Round 5 alpha=0.1 對 token loss 干擾過大；降低 alpha 或換 pairwise 形式可能使 ranking signal 更乾淨 |
 | **Training loss primary horizon 改為 h3/h7**（改訓練目標本身）| 260622 N2, 260626 N3 | 🟡 中 | 注意區分：用短 horizon 作為 **early stop metric** 已在 Round 4 測試（h=1，失敗）。這裡指的是更強版本——把 h=3 作為 **training loss 的 primary target**（取代均值），讓模型在訓練期間就直接優化短期預測。Label Horizon Paradox（arxiv:2602.03395）支持此方向，但未測試 |
 | **Horizon-Weighted Loss**（h4/h5 weight 更高）| 260622 N3 | 🟡 中 | 不需要架構改動，但需要重訓 |
 | **Price-space MSE 輔助損失** | 260626 S1 | 🟠 低（moonshot）| 解碼 token → price，計算 MSE；需改 tokenizer |
 | **ic_val_dates 至 60** | 260629 N2 | 🟠 低 | SE(IC-IR)=0.14，統計力充足；目前用 40 |
 | **連續回歸 head / Chronos-2 架構** | 260626 S2 | 🔵 研究級 | 拋棄 BSQ 離散化，論文級工作量 |
-| **Listwise Ranking Loss（ListMLE/ApproxNDCG）**| 260622 S1 | 🔵 研究級 | 需重構整個 training loop |
 
 **關鍵未驗證組合（最值得嘗試）：**  
-`pretrained 完全重啟 + close-to-close IC-IR@h1 early stopping + Auxiliary Ranking Loss`  
-→ 解決局部最優問題，同時直接對排名目標優化，文獻支撐最強。
+`pretrained 完全重啟 + close-to-close IC-IR@h1 early stopping`  
+→ Round 5 確認 pretrained 重啟必要；Ranking Loss（ListMLE alpha=0.1）已驗證無效。close-to-close IC-IR@h1 early stopping（SNR=0.64）從未配合 pretrained 重啟測試過，是目前最大的空白。
+
+---
+
+### 全新架構方向（autoresearch 260701，從未嘗試）
+
+| 方法 | 來源 | 優先度 | 說明 |
+|------|------|--------|------|
+| **Kronos Embedding → XGBoost + LambdaRankIC** | arXiv:2605.00501 | 🔴 最高 | 凍結 Kronos-base，提取 hidden states（512d），用 XGBoost 搭配 LambdaRankIC 直接優化 Rank IC。低 SNR 環境（我們的 IC~0.04）下一致優於 regression/ListMLE。**完全繞過 fine-tuning 問題** |
+| **L2-SP 正則化（L2 距離 pretrained weights）** | arXiv:2603.18596 | 🟡 高 | fine-tuning loss 加 `λ‖θ-θ₀‖²`，防止偏離 pretrained landscape。比 EWC 更簡單（不需 Fisher matrix） |
+| **MoFO Optimizer** | arXiv:2407.20999 | 🟡 高 | 只更新動量幅度最大的 top-K% 參數；其他參數凍結。無需 pretrained 資料、無需 Fisher 估計，比 FPT 更動態 |
+| **SSPT 台股持續預訓練（股票分類 + 產業分類 + MA）** | arXiv:2506.16746, KDD 2025 | 🟠 中 | 先以台股資料做自監督預訓練，讓 Kronos 了解台股身份後再 fine-tune predictor |

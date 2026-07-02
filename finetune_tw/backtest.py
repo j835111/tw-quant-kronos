@@ -137,12 +137,14 @@ def signals_to_holdings(
     hold_days: int,
     top_k: int,
     threshold: float = 0.0,
+    rank_h: int | None = None,
 ) -> list[set[str]]:
+    rh = hold_days if rank_h is None else rank_h
     holdings = []
     for d in rebal_dates:
         date_preds = raw_preds.get(d.strftime("%Y-%m-%d"), {})
-        signals = {sym: ret.iloc[hold_days - 1]
-                   for sym, ret in date_preds.items() if len(ret) >= hold_days}
+        signals = {sym: ret.iloc[rh - 1]
+                   for sym, ret in date_preds.items() if len(ret) >= rh}
         holdings.append(rank_stocks(signals, top_k, threshold))
     return holdings
 

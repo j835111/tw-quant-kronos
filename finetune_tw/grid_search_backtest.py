@@ -45,6 +45,8 @@ def run_grid_search(
     threshold_list: list[float] | None = None,
     cache_only: bool = False,
     load_cache: bool = True,
+    rank_h_list: list[int] | None = None,
+    max_symbols: int | None = None,
 ) -> None:
     specs = build_model_specs(cfg)
     if model_key not in specs:
@@ -56,6 +58,8 @@ def run_grid_search(
     cache_path = out_dir / f"raw_preds_{model_key}.json"
 
     symbols = [s for s in list_symbols(cfg.db_path) if s != cfg.benchmark_symbol]
+    if max_symbols is not None:
+        symbols = symbols[:max_symbols]
     test_end = str(pd.Timestamp.today().date())
     max_hold = max(hold_days_list)
     min_hold = min(hold_days_list)
@@ -113,48 +117,52 @@ def run_grid_search(
     # ── Step 3: grid search ───────────────────────────────────────────────────
     thresholds = threshold_list if threshold_list is not None else [0.0]
     multi_thresh = len(thresholds) > 1
+    rh_sweep = rank_h_list if rank_h_list else [None]
     print(f"\n{'='*70}")
     print(f"Grid search: top_k={top_k_list} × hold_days={hold_days_list}"
+          + (f" × rank_h={rank_h_list}" if rank_h_list else "")
           + (f" × threshold={thresholds}" if multi_thresh else ""))
     print(f"Benchmark: Sharpe={bm_metrics['sharpe']:.2f}  "
           f"Ann={bm_metrics['annualised_return']:.1%}  "
           f"DD={bm_metrics['max_drawdown']:.1%}")
     print(f"{'='*70}")
-    header = (f"{'top_k':>6} {'hold':>5} {'thr':>6} {'Ann':>8} {'Sharpe':>8} {'MaxDD':>8} {'rank':>5}"
+    header = (f"{'rank_h':>6} {'top_k':>6} {'hold':>5} {'thr':>6} {'Ann':>8} {'Sharpe':>8} {'MaxDD':>8} {'rank':>5}"
               if multi_thresh else
-              f"{'top_k':>6} {'hold':>5} {'Ann':>8} {'Sharpe':>8} {'MaxDD':>8} {'rank':>5}")
+              f"{'rank_h':>6} {'top_k':>6} {'hold':>5} {'Ann':>8} {'Sharpe':>8} {'MaxDD':>8} {'rank':>5}")
     print(header)
     print("-" * len(header))
 
     results = []
-    for threshold in thresholds:
-        for top_k in top_k_list:
-            for hd in hold_days_list:
-                step = max(1, hd // min_hold)
-                variant_dates = fine_dates[::step]
-                holdings = signals_to_holdings(raw_preds, variant_dates, hd, top_k, threshold)
-                _, dr = build_portfolio_returns(close_prices, holdings, variant_dates)
-                m = compute_metrics(dr)
-                results.append({
-                    "top_k": top_k,
-                    "hold_days": hd,
-                    "threshold": threshold,
-                    **m,
-                    "daily_returns": dr.tolist(),
-                    "dates": [d.strftime("%Y-%m-%d") for d in dr.index],
-                })
+    for rank_h in rh_sweep:
+        for threshold in thresholds:
+            for top_k in top_k_list:
+                for hd in hold_days_list:
+                    step = max(1, hd // min_hold)
+                    variant_dates = fine_dates[::step]
+                    holdings = signals_to_holdings(raw_preds, variant_dates, hd, top_k, threshold, rank_h=rank_h)
+                    _, dr = build_portfolio_returns(close_prices, holdings, variant_dates)
+                    m = compute_metrics(dr)
+                    results.append({
+                        "top_k": top_k,
+                        "hold_days": hd,
+                        "rank_h": rank_h if rank_h is not None else hd,
+                        "threshold": threshold,
+                        **m,
+                        "daily_returns": dr.tolist(),
+                        "dates": [d.strftime("%Y-%m-%d") for d in dr.index],
+                    })
 
     # Sort by Sharpe descending
     results.sort(key=lambda r: r["sharpe"], reverse=True)
     for rank, r in enumerate(results, 1):
         if multi_thresh:
-            print(f"{r['top_k']:>6} {r['hold_days']:>5} {r['threshold']:>6.3f} "
+            print(f"{r['rank_h']:>6} {r['top_k']:>6} {r['hold_days']:>5} {r['threshold']:>6.3f} "
                   f"{r['annualised_return']:>7.1%} "
                   f"{r['sharpe']:>8.2f} "
                   f"{r['max_drawdown']:>7.1%} "
                   f"{rank:>5}")
         else:
-            print(f"{r['top_k']:>6} {r['hold_days']:>5} "
+            print(f"{r['rank_h']:>6} {r['top_k']:>6} {r['hold_days']:>5} "
                   f"{r['annualised_return']:>7.1%} "
                   f"{r['sharpe']:>8.2f} "
                   f"{r['max_drawdown']:>7.1%} "
@@ -273,11 +281,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="finetune_tw/configs/config_tw_daily.yaml")
     parser.add_argument("--model", required=True,
-                        choices=["pretrained", "round0", "round1", "round2"])
+                        choices=["pretrained", "round0", "round1", "round2", "round3", "round4", "round5"])
     parser.add_argument("--top_k_list",    type=int, nargs="+", default=[10, 20, 30, 50])
     parser.add_argument("--hold_days_list", type=int, nargs="+", default=[3, 5, 7, 10])
     parser.add_argument("--threshold_list", type=float, nargs="+", default=None,
                         help="Min predicted return thresholds to sweep (default: [0.0])")
+    parser.add_argument("--rank_h_list", type=int, nargs="+", default=None,
+                        help="Ranking horizons to sweep (default: same as hold_days)")
+    parser.add_argument("--max_symbols", type=int, default=None,
+                        help="Limit to first N symbols for testing (default: all)")
     parser.add_argument("--cache-only", action="store_true",
                         help="Only run inference and cache; skip grid search")
     parser.add_argument("--no-cache", action="store_true",
@@ -293,6 +305,8 @@ def main() -> None:
         threshold_list=args.threshold_list,
         cache_only=args.cache_only,
         load_cache=not args.no_cache,
+        rank_h_list=args.rank_h_list,
+        max_symbols=args.max_symbols,
     )
 
 
