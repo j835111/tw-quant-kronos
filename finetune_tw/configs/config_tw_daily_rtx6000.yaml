@@ -36,7 +36,7 @@ ranking_loss_alpha: 0.0
 ranking_loss_horizon: 5
 
 pretrained_tokenizer: "NeoQuasar/Kronos-Tokenizer-base"
-pretrained_predictor: "j835111/kronos-tw-finetune"
+pretrained_predictor: "NeoQuasar/Kronos-base"
 hf_revision: "round-0"
 hf_repo: "j835111/kronos-tw-finetune"
 hf_revision_out: "round-3"

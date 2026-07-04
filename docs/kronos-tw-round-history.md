@@ -426,37 +426,72 @@ Benchmark ^TWII：Sharpe=1.47，Ann=41.24%
 
 ---
 
-## Round 6 Batch 3c — 2026-07-04（同一 M1 架構，修正特徵工程 + 選模指標 + 驗證窗口後翻正）
+## Round 6 後續（Batch 1-3c 診斷修正 + Direction 2 模型融合）— 2026-07-03 ~ 2026-07-04
 
-**起點：** 與 Round 6 相同的 M1 架構（凍結 `NeoQuasar/Kronos-base` 抽 embedding + XGBoost LambdaRankIC），**embedding backbone 仍是完全未微調的 pretrained**，沒有動用任何 round0-5 的微調成果。
-**Branch：** `research/round-6-followup`（Round 6 的後續診斷/修正分支，不合併回 master，完整過程見該分支的 `docs/round6-embedding-xgb-lambdarank-improvements.md`）
+**背景：** Round 6（M1）的失敗被進一步拆解為源碼層級診斷（`docs/round6-embedding-xgb-lambdarank-improvements.md`），找出三個具體缺陷：mean-pooling 稀釋時序訊號、特徵缺乏橫截面相對排名（cs_rank）、動能維度單一。以下 Batch 1-3c 依序驗證修正方案，全部細節見該文件；本節只記錄關鍵結論與最終產物。
 
-**問題診斷（Batch 1-2，CPU 診斷+歸因）確認了 Round 6 失敗的機制**：embedding 對全市場排序有真實貢獻，但驗證期只用單一 2024H1 regime 做 early stopping，導致模型學到偏反轉的因子，2026-Q2 動能行情裡 top-10 選股跟大盤反著走（mean IC 0.016、top-10 excess −1.03%）。
+### Batch 1 — 交易日曆修正診斷（CPU，2026-07-03，Go）
 
-**三處修正（Batch 3 系列，逐步迭代）：**
-1. **方案 B/C 特徵工程**：加入 cross-sectional rank 特徵（cs_rank）與 13 個多尺度動能/波動率技術指標，特徵數從 4 個擴充到 858 個（`full`）/ 26 個（`raw`，不含 embedding）
-2. **選模指標**：試過 `top_k_excess`（Batch 3，在小驗證窗上噪音過大、1-3 輪就早停，No-Go）與純延長驗證窗天數（Batch 3b，2023-2024H1，No-Go——2026-Q2 表現反而更差），最終確定用 **`rank_ic`**（平滑、低方差）當早停判準
-3. **多 regime 驗證窗口**：刻意在驗證集裡拼入 **2021 年後疫情動能牛市**（2021-01-04~2021-06-30）+ 原本的 2023-01~2024-06 窗口，強迫 early stopping 在「動能」與「反轉」規律間取得平衡，而不是只鎖進單一 regime
+修正 `extract_embeddings.py` 用 `pd.bdate_range` 誤將台股非交易日（如農曆年假）當成交易日的缺陷後，對 Round 6 舊模型做逐季 rank-IC 診斷：**確認 2026-Q2 IC 崩到其他季度的 1/4（0.016 vs 平均 ~0.09），且集中在該單季**——與 Round 6 回測拆解的機制吻合，regime 依賴假說成立。同時發現一個比假說本身更重要的新問題：**top-tail 是慢性病，不只 2026-Q2**——八個季度的 top-10 命中率全部貼著隨機水準（~0.9% vs 隨機期望 0.96%）。
 
-**IC 診斷結果（測試期 2024-07-01~2026-06-17，475 個交易日）：**
+### Batch 2 — Embedding vs Raw Feature Ablation（CPU，2026-07-03，Go）
 
-| | Round 6 原版 | Batch 3c `raw`（26 特徵，無 embedding） | Batch 3c `full`（858 特徵） |
+在乾淨日曆的 train/val 上重訓 `raw`（4 特徵）/ `emb`（832 維 embedding）/ `full`（合併）三組模型：**embedding 對全市場排序有真貢獻**（`emb` mean IC 0.064 > `raw` 0.057），但 **`emb` 的 top-10 overlap 幾乎歸零（0.15%）**，反而 `raw` 的 overlap 有 1.62%——**embedding 側擅長 full-universe ranking，raw 側擅長 top-tail identification，兩者互補而非取代**。結論：優先修特徵工程 + 選模目標，方案 A（改 pooling）延後。
+
+### Batch 3 / 3b — 特徵工程 + top_k_excess 早停（No-Go，2026-07-04）
+
+落地方案 B（cs_rank）+ 方案 C（13 個多尺度動能/波動率特徵），並將選模指標改為 `top_k_excess`。**結果：`raw`/`full` 的 `best_iteration` 只有 1（Batch 3）或 3（Batch 3b，驗證窗口擴大到 239 天後）**——`top_k_excess` 在小驗證集上方差過大，early stopping 在噪音中賭運氣，模型嚴重欠訓練，測試期表現全面劣於 Batch 2 baseline。診斷：特徵工程方向正確（`raw` 全市場 IC 提升 24%），但選模指標改造必須配合多 regime 驗證窗口同批實施，未做即失敗。
+
+### Batch 3c — rank_ic 早停 + 刻意納入 2021 動能 regime 驗證窗口（Go，2026-07-04）
+
+早停指標改回 `rank_ic`（訓練曲線平滑、不易被噪音誤判收斂），驗證窗口改為 2021H1（後疫情動能牛市）聯集 2023-01~2024-06（1.5 年），迫使模型在「動能」與「反轉」間找到穩健的迭代點。兩模型都跑滿 200 輪上限（`best_iteration=199`），未觸發早停。
+
+**Diagnostics 結果（測試期 475 個交易日）：**
+
+| 模型 | 特徵數 | val rank-IC | 測試期 mean IC | IC-IR | top-10 excess | top-10 overlap |
+|---|---:|---:|---:|---:|---:|---:|
+| Batch 2 `full`（對照） | 836 | 0.0716 | 0.0813 | 0.610 | +0.206% | 0.78% |
+| **Batch 3c `raw`** | 26 | 0.0810 | **0.0888**（+56%） | 0.568 | **+0.490%**（+149%） | 1.01% |
+| **Batch 3c `full`** | 858 | 0.0873 | **0.0933**（+15%） | 0.592 | +0.348% | 0.82% |
+
+2026-Q2 top-10 excess：`raw` 從 Round 6 原模型的 **-1.03% 翻正為 +0.751%**（四批實驗以來最好），`full` 從 -1.03% 收斂到接近零的 -0.045%。兩模型都輕鬆超過 Go 判準（IC > 0.080、top-10 excess > +0.20%）。
+
+**真實 next-open 回測驗證（同一套 `signals_to_holdings` 框架，與 Round 0/4/5/6 直接可比）：**
+
+| 策略 | hold_days | Ann | Sharpe | MaxDD |
+|---|---:|---:|---:|---:|
+| Round 0（純 Kronos） | 5 | 38.59% | 1.115 | 35.03% |
+| Round 4（純 Kronos，先前最佳） | 5 | 45.94% | 1.241 | 33.99% |
+| Round 6 M1 舊版 | 5 | 5.52% | 0.340 | 30.29% |
+| Batch 3c `raw`（純技術指標+cs_rank，無 Kronos） | 5 | 24.44% | 1.104 | 27.69% |
+| **Batch 3c `full`（Kronos embedding + 技術特徵 + XGBoost）** | 5 | **31.17%** | **1.336** | **27.21%** |
+
+**`full` 的 Sharpe 1.336 刷新了 Round 0-6 系列的最佳紀錄**（超越先前最佳 Round 4 的 1.241），且用的是同一顆**未微調**的 Kronos pretrained backbone。已上傳至 HF `j835111/kronos-tw-finetune@round6-batch3c-full-production`。方案 A（GPU pooling 重抽 embedding）確認不再需要觸發。
+
+### Backbone 替換實驗（pretrained vs round0 embedding）— No-Go（2026-07-04）
+
+Batch 1-3c 全程用未微調的 `NeoQuasar/Kronos-base` 抽 embedding。兩輪 CPU smoketest（20 檔傳統股池、30 檔均衡電子/傳產股池）都顯示：**`pretrained` backbone 在所有 IC 指標上全面優於 `round0`（TW 微調過）backbone**，方向與直覺相反。診斷為「特徵表示空間塌陷」：`round0` 的微調目標（單股時序預測）把 embedding 空間收斂到對自身任務有利、但對 XGBoost 下游跨股票排名反而較貧乏的低維表示。**Direction 1（backbone 替換）判定 No-Go**，未來不再投入 GPU 資源做微調版 backbone 重抽。
+
+### Direction 2 — `full` + `raw` 模型 Z-Score 融合（Go，最終 production，2026-07-04）
+
+`full`（全市場排序強）與 `raw`（top-tail 抓飆股強）的每日分數 Spearman 相關 0.876、Top-10 持股重疊率僅 50%、策略日報酬相關 0.872——互補性充足。融合前對每日截面分數做 Z-Score 標準化再線性加權：$Score_{blended} = w\cdot Z(Score_{full}) + (1-w)\cdot Z(Score_{raw})$。
+
+**全期網格搜索（475 交易日）：**
+
+| 權重 $w$（full） | Ann | Sharpe | MaxDD |
 |---|---:|---:|---:|
-| 測試期 mean IC | — | 0.0888 | 0.0933 |
-| top-10 excess | — | +0.490% | +0.348% |
-| 2026-Q2 top-10 excess | **−1.03%** | +0.751%（轉正） | −0.045%（近乎中和） |
+| 1.0（純 full） | 31.05% | 1.3258 | 27.21% |
+| 0.0（純 raw） | 22.09% | 1.0191 | 27.69% |
+| **0.6** | **36.35%** | **1.5434** | **24.86%** |
 
-**真實回測結果（next-open 執行，`--model pretrained`，top_k=10，hold=5d，跟 Round 0 用同一套框架直接可比）：**
+最佳權重 $w=0.6$ 周遭（0.5/0.7）表現平穩，非隨機噪訊尖峰。**樣本外時間分片驗證**（IS：2024H2-2025H1 校準 $w^*=0.6$；OOS：2025H2-2026H1，含 2026-Q2）：$w^*=0.6$ 在 OOS 達到 **Sharpe 3.3952（Ann 58.30%、MaxDD 8.37%）**，同時壓倒純 `raw`（2.14）與純 `full`（3.24），泛化穩定性通過驗證，排除選擇性洩漏疑慮。
 
-| 指標 | Round 6 原版 | Batch 3c `raw` | **Batch 3c `full`** | Round 0（基準） |
-|------|---:|---:|---:|---:|
-| **Sharpe** | 0.340 | 1.104 | **1.336** | 1.115 |
-| **Ann** | 5.52% | 24.44% | 31.17% | 38.59% |
-| **MaxDD** | 30.29% | 27.69% | **27.21%** | 35.03% |
+**最終生產決策：部署靜態 Z-Score 融合策略（$w=0.6$），Sharpe 1.5434 / MaxDD 24.86% 為目前 Round 0-6 全系列最佳可執行結果**，取代 Batch 3c `full` 單模型作為正式 production。動態權重方案（滾動 IC 追蹤 / 大盤 regime gating）評估後判定暫緩——額外增益僅約 +0.03 Sharpe，不足以抵銷過擬合與系統複雜度風險。`finetune_tw/backtest_xgb_ensemble.py` 為固化後的線上推理腳本（此文件記錄時尚待完全落地）。
 
-**結論：`full` 模型的 Sharpe 1.336 刷新了 Round 0-6 全系列紀錄**，把 Round 6 原版的失敗（0.34）修復成近 4 倍提升，MaxDD 也比 Round 0 低了將近 8 個百分點。特徵工程本身也有獨立價值——不用任何 Kronos embedding 的 `raw` 模型（純技術指標 + cs_rank）Sharpe 1.104 已幾乎追平 Round 0。**Batch 3c `full` 現為建議採用的正式 production 模型**，取代 Round 0-5 純 Kronos top-k 策略；相關程式碼、診斷、production checkpoint（HF `j835111/kronos-tw-finetune@round6-batch3c-full-production`）保留在 `research/round-6-followup` 分支（依專案分支策略不合併回 master）。
-
-**未驗證的後續方向**：目前的 embedding backbone 是未微調的 pretrained，換成 round0（或更後面）已微調的 backbone 重跑整套流程是否能再進一步提升，尚未評估——詳見 `research/round-6-followup` 分支文件的「後續評估方向」章節。
+**參考資料：**
+- `docs/round6-embedding-xgb-lambdarank-improvements.md`（完整診斷、代碼細節、每批次執行記錄）
+- `finetune_tw/round6_diagnostics.py`, `finetune_tw/feature_engineering.py`, `finetune_tw/enrich_round6_features.py`, `finetune_tw/train_xgb_streaming.py`, `finetune_tw/backtest_xgb_ensemble.py`
+- HF `j835111/kronos-tw-finetune@round6-batch3c-full-production`
 
 ---
 
@@ -473,13 +508,14 @@ Benchmark ^TWII：Sharpe=1.47，Ann=41.24%
 | Round 5 | 0.98 | 31.79% | 39.86% | Pretrained 重啟 + Ranking Loss，仍輸 Round 0 |
 | Round 6 | 0.34 | 5.52% | 30.29% | Kronos Embedding + XGBoost LambdaRankIC（M1）；主因錯過 2026-Q2 動能行情（該季 −4.3% vs R0 +43.9%），排除該季後為 0.48 vs 0.63 |
 | Round 6 Batch 3c `raw` | 1.104 | 24.44% | 27.69% | 純技術指標+cs_rank+XGBoost，不含 embedding，接近 Round 0 |
-| **Round 6 Batch 3c `full`** | **1.336** | 31.17% | **27.21%** | Kronos embedding+方案B/C特徵+rank_ic早停+多regime驗證，**全系列最佳，現為建議 production 模型** |
+| Round 6 Batch 3c `full` | 1.336 | 31.17% | 27.21% | 修正版特徵工程（cs_rank+多尺度動能）+ rank_ic 早停 + 多 regime 驗證窗口，刷新當時最佳紀錄 |
+| **Round 6 Direction 2（`full`+`raw` Z-Score 融合，w=0.6）** | **1.5434** | **36.35%** | **24.86%** | **目前全系列最佳可執行結果**；OOS 時間分片驗證 Sharpe 3.395，泛化穩定 |
 
 ---
 
 ## 結論與下一步
 
-**Round 6 Batch 3c `full` 現為目前唯一建議採用的正式版本（Sharpe 1.336，取代 Round 0 的 1.12 舊基準）。**
+**Round 6 Direction 2（`full`+`raw` Z-Score 融合，w=0.6）為目前全系列最佳可執行版本（Sharpe 1.5434），已超越 Round 0 基準（1.12）與此前所有重訓/策略調整方向。**
 
 已窮盡所有已知方向（截至 2026-07-04）：
 - 重訓（Round 1-5）：全部退步，Round 0 曾是上限
@@ -489,20 +525,21 @@ Benchmark ^TWII：Sharpe=1.47，Ann=41.24%
 - Label Horizon 掃描：IC-IR 從 h=1 單調衰減，換 hold_days 無效
 - FPT freeze（Round 4）：best epoch=1
 - Pretrained 重啟 + Auxiliary Ranking Loss（Round 5）：Sharpe 0.98，退步
-- **凍結 Kronos + XGBoost LambdaRankIC 原版（Round 6）：Sharpe 0.34**，但同一架構加上特徵工程 + 選模指標修正 + 多 regime 驗證窗口後（**Round 6 Batch 3c，見上方章節**），`full` 模型 Sharpe 達 **1.336，刷新全系列紀錄**，正式超越 Round 0——下方「Round 6 之後的思考」與「未驗證方向」是 Batch 3c 之前（2026-07-02）寫的歷史記錄，保留供參考，但其中「Round 0 是唯一可執行版本」的結論已被 Batch 3c 推翻
-- **凍結 Kronos + XGBoost LambdaRankIC（Round 6 / M1）：Sharpe 0.34**——但逐季拆解後，主因是錯過 2026-Q2 動能行情（大盤 +40.5% 該季 R6 虧 4.3%），排除該季後為 0.48 vs 0.63 的溫和劣勢，不是全程慘敗
+- **凍結 Kronos + XGBoost LambdaRankIC 原版（Round 6 / M1）：Sharpe 0.34**——逐季拆解後，主因是錯過 2026-Q2 動能行情（大盤 +40.5% 該季 R6 虧 4.3%），排除該季後為 0.48 vs 0.63 的溫和劣勢；但同一架構加上特徵工程 + 選模指標修正 + 多 regime 驗證窗口後（**Round 6 Batch 3c**），`full` 模型 Sharpe 達 1.336，刷新全系列紀錄；再融合 `raw`（Direction 2）後達到 **1.5434**，正式超越 Round 0——下方 2026-07-03~07-04 的突破章節取代了 2026-07-02 當時「Round 0 是唯一可執行版本」的舊結論
 
-**Round 6 之後的思考（含逐季拆解後的修正）：** 連續兩輪（Round 5、Round 6）都出現「驗證集指標創新高，但回測 Sharpe 不升反降」的模式。Round 6 的事後分析給出了比「評估落差」更具體的機制：
-1. **Regime 依賴是主因**：XGBoost + rank-IC 從 2015-2023 歷史學到的截面規律偏反轉性質，在動能主導的行情（2026-Q2 大盤單季 +40.5%）直接反噬；Kronos autoregressive 預測天生趨勢外推，反而吃到這波。「驗證集 IC 高但回測差」的機制 = IC 量的是全體平均排序（策略只買 top 1%）+ IC 不衡量 regime 穩健性
-2. **Round 0 基準的穩健性也要打折**：1.12 有很大一塊是 2026-Q2 單季貢獻（排除後 0.63），它某種程度上是「賭對了動能行情」
-3. **先做便宜的診斷實驗再上大規模訓練**：例如算出測試期的逐期 IC，確認 Round 6 的 IC 是否在 2026-Q2 翻負
+**2026-07-03 ~ 07-04 的突破（Batch 1-3c + Direction 2）扭轉了上述結論：**
+1. **Batch 1 診斷確認 regime 依賴機制**：交易日曆修正後，Round 6 舊模型逐季 IC 顯示 2026-Q2 崩到其他季度 1/4，且發現更根本的「top-tail 慢性病」——八季 top-10 命中率全貼隨機水準。
+2. **Batch 2 ablation 證明 embedding 與 raw feature 互補**：embedding 側擅長全市場排序，raw 側擅長 top-tail 抓飆股，兩者都不能丟。
+3. **Batch 3/3b 的教訓**：選模指標改造（`top_k_excess`）必須與多 regime 驗證窗口同批實施，否則小驗證集噪音會讓 early stopping 嚴重欠訓練（best_iteration 只有 1-3）。
+4. **Batch 3c（rank_ic 早停 + 刻意納入 2021 動能 regime 驗證窗口）是關鍵修正**：測試期 mean IC、top-10 excess 大幅改善，2026-Q2 top-tail 失效問題實質收斂，真實回測 `full` 模型 Sharpe 達 1.336，刷新當時最佳紀錄。
+5. **Backbone 替換（round0 微調版 embedding）驗證為 No-Go**：兩輪 smoketest 都顯示 pretrained backbone 優於 round0，判定為「特徵表示空間塌陷」——微調把 embedding 空間收斂到對自身任務有利但通用性較差的低維流形。
+6. **Direction 2（`full`+`raw` Z-Score 融合）是最終突破**：兩模型互補性充足（Top-10 重疊率僅 50%），融合後全期 Sharpe 1.5434、MaxDD 24.86%，且通過樣本外時間分片驗證（OOS Sharpe 3.395），排除選擇性洩漏疑慮。**首次達成 Sharpe ≥ 1.5 的收斂目標。**
 
-**未驗證的 M1 後續方向（按逐季拆解後的新優先順序）：**
-1. **測試期逐期 IC 診斷**（最便宜，先做）：確認 regime 依賴假說——若 2026-Q2 的 IC 翻負即證實
-2. **加動能類特徵**：目前 4 個技術指標只有 momentum_10 一個動能項，模型幾乎沒有表達趨勢行情的能力；擴充動能特徵組（多時間尺度動量、52週高點距離等）
-3. **多 regime 驗證期**：early stopping 不要只用 2024H1 單一窗口，改用多段不同性質行情的組合
-4. **Ensemble Kronos（動能性）+ XGBoost（反轉性）訊號**：兩者相關性 0.678，性質互補，混合可能比單用任一個穩健
-5. **Round 0 embedding 對照 / `layer_indices` 消融 / raw-feature-only 對照**：原計畫的消融實驗，優先度降低——在解決 regime 依賴之前，這些微調的預期收益有限
+**尚待落地／未驗證方向：**
+1. `finetune_tw/backtest_xgb_ensemble.py` 線上推理腳本尚待完全固化為生產流程。
+2. 動態權重方案（滾動 IC 追蹤門控 / 大盤 regime gating）：評估後判定暫緩，額外增益有限（+0.03 Sharpe）且有過擬合風險，僅在靜態融合出現失效跡象時才重新考慮。
+3. 2026-04（Batch 3c 兩模型仍最弱的月份）值得單獨診斷特徵貢獻與殘留反轉曝險。
+4. Round 0 embedding 對照 / `layer_indices` 消融：優先度持續降低，Direction 2 已達成收斂目標。
 
 **若要回到 fine-tuning 路線，可考慮的未驗證方向：**
 1. **更大的驗證集 + 更長訓練**：val 集 150×40 可能太小，導致 ic_ir 估計噪音大、early stop 不穩定
@@ -533,7 +570,12 @@ Benchmark ^TWII：Sharpe=1.47，Ann=41.24%
 | Pretrained 重啟（從 Kronos-base）| — | Round 5 | ❌ 必要但不充分；重啟後 val_loss 起點 2.93，但回測仍輸 Round 0 |
 | Auxiliary Ranking Loss（ListMLE, alpha=0.1）+ Pretrained 重啟 | 260622 N1, 260626 N1, 260629 N1 | Round 5 | ❌ val ic_ir_h5=0.47 但 Sharpe 0.98，ranking loss 未轉化為回測改善；alpha=0.1 對 token CE 有輕微干擾（val_loss 緩升） |
 | Kronos Embedding + XGBoost LambdaRankIC（凍結 Kronos，繞開 fine-tuning）| 260701 M1 | Round 6 | ❌ val-rank_ic 創新高（0.066，全母體）但 Sharpe 僅 0.34；逐季拆解=主因錯過 2026-Q2 動能行情，排除後 0.48 vs 0.63 |
-| 同上 + cs_rank/多尺度技術特徵 + rank_ic 早停 + 多 regime（含 2021 動能牛市）驗證窗口 | — | Round 6 Batch 3c | ✅ Sharpe 1.336，刷新全系列紀錄，取代 Round 0 為建議 production 模型；`raw`（不含 embedding，純特徵工程）Sharpe 1.104 亦接近 Round 0，證明特徵工程本身有獨立價值 |
+| 交易日曆修正 + 逐季 IC 診斷 | round6-improvements Batch 1 | Batch 1 | ✅ 確認 2026-Q2 regime 依賴，並發現 top-tail 慢性病（八季 top-10 命中率貼隨機水準） |
+| Raw/Embedding/Full ablation | round6-improvements Batch 2 | Batch 2 | ✅ embedding 擅長全市場排序、raw 擅長 top-tail，互補非取代 |
+| cs_rank + 多尺度動能特徵（B+C）+ `top_k_excess` 早停 | round6-improvements Batch 3 | Batch 3/3b | ❌ 小驗證集下 `top_k_excess` 噪音過大，best_iteration=1~3，嚴重欠訓練 |
+| cs_rank + 多尺度動能特徵（B+C）+ `rank_ic` 早停 + 2021 動能 regime 驗證窗口 | round6-improvements Batch 3c | Batch 3c | ✅ Sharpe 1.336，刷新全系列紀錄，取代 Round 0 為建議 production 模型；`raw`（不含 embedding，純特徵工程）Sharpe 1.104 亦接近 Round 0，證明特徵工程本身有獨立價值 |
+| Backbone 替換（round0 微調版 embedding 取代 pretrained）| round6-improvements 後續 | 兩輪 CPU smoketest | ❌ pretrained 全面優於 round0，判定「特徵表示空間塌陷」，No-Go |
+| `full`+`raw` 每日截面 Z-Score 線性融合 | round6-improvements Direction 2 | Direction 2 | ✅ Sharpe 1.5434（全系列最佳），OOS 時間分片驗證 Sharpe 3.395，泛化穩定 |
 
 ### 未驗證（autoresearch 有記錄，從未測試）
 

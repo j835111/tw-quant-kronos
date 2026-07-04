@@ -12,16 +12,17 @@ Published at AAAI 2026. Models are hosted on HuggingFace under `NeoQuasar/`.
 
 | 前綴 | 用途 | 合併回 master？ |
 |------|------|----------------|
-| `research/round-N` | 訓練實驗（config、loss、early stop 策略） | ❌ 保留，不合併 |
-| `research/NAME` | 其他探索性實驗（ensemble、新架構） | ❌ 保留，不合併 |
+| `research/round-N` | 訓練實驗（config、loss、early stop 策略） | ⚠️ 視結果而定，見下 |
+| `research/NAME` | 其他探索性實驗（ensemble、新架構） | ⚠️ 視結果而定，見下 |
 | `feature/NAME` | 工具、基礎建設、backtest 腳本改進 | ✅ 合併 |
 | `fix/NAME` | Bug fix | ✅ 合併 |
 
-**規則：**
-- `research/` 分支永遠不合併回 master，用 `git log --oneline research/round-N` 保留完整歷史
-- 實驗結果記錄在 `autoresearch/tw-evals/finetune-tw-results.tsv` 和 `docs/kronos-tw-round-history.md`（這兩個文件在 master 上更新）
-- `feature/` 和 `fix/` 完工後合併，刪除分支
-- 結束一個 `research/` 分支前，先確認 TSV 和 round-history 已在 master 更新，再開下一輪
+**規則（2026-07-04 起）：**
+- `research/` 分支預設**不合併回 master**，只把摘要記錄到 `autoresearch/tw-evals/finetune-tw-results.tsv` 和 `docs/kronos-tw-round-history.md`（這兩個文件在 master 上更新），程式碼與完整過程留在分支上，用 `git log --oneline research/round-N` 保留歷史。
+- **例外：一旦某個 `research/` 分支的結果成為新的正式 production 基準**（例如 `research/round-6-followup` 的 Direction 2 融合模型，Sharpe 1.5434，取代先前所有版本），該分支就**合併回 master**（`git merge --no-ff`），讓程式碼與文件都併入主線，作為後續優化的新起點。合併後分支可保留或刪除皆可，端看是否還有未完成的後續實驗。
+- 失敗/no-op/被推翻的實驗性分支（如 `research/round-1` ~ `round-5`、`research/round-6-m1-embedding`）維持舊規則，不合併，僅摘要進 master 的兩份文件。
+- `feature/` 和 `fix/` 完工後合併，刪除分支。
+- 結束一個 `research/` 分支前，先確認 TSV 和 round-history 已在 master 更新（不論是否合併），再開下一輪。
 
 ## Commands
 
