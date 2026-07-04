@@ -125,6 +125,9 @@ def run_backtest_xgb_ensemble(
         )
 
     specs = build_model_specs(cfg)
+    if "pretrained" in specs:
+        specs["pretrained"].tok_kwargs["revision"] = "0e0117387f39004a9016484a186a908917e22426"
+        specs["pretrained"].pred_kwargs["revision"] = "2b554741eca47781b64468546e77fef3e85130e6"
     predictor = load_predictor_from_spec(specs[model_key], cfg)
     
     booster_full = xgb.Booster()
