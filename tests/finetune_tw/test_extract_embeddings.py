@@ -125,29 +125,43 @@ def test_extract_embeddings_batch_distinguishes_different_inputs():
 
 
 def test_compute_technical_features_matches_hand_calculation():
-    n = 25
+    n = 70
     idx = np.arange(n, dtype=np.float64)
-    close = 100.0 + idx  # 100, 101, ..., 124
+    close = 100.0 + idx
+    volume = 200.0 + idx
+    volumes = volume.copy()
+    volumes[-1] = 800.0
     df = pd.DataFrame({
-        "open": close, "high": close + 0.5, "low": close - 0.5, "close": close,
-        "volume": np.full(n, 200.0), "amount": np.full(n, 20000.0),
+        "open": close,
+        "high": close + 0.5,
+        "low": close - 0.5,
+        "close": close,
+        "volume": volumes,
+        "amount": np.full(n, 20000.0),
     })
-    # bump the last day's volume so feat_volume_ratio is not exactly 1.0
-    df.loc[df.index[-1], "volume"] = 400.0
 
     feats = compute_technical_features(df)
 
-    last_close = close[-1]                         # 124.0
-    expected_ma5 = close[-5:].mean()              # mean(120..124) = 122.0
-    expected_ma20 = close[-20:].mean()            # mean(105..124) = 114.5
-    expected_momentum_10 = last_close / close[-11] - 1.0  # 124/114 - 1
-    expected_vol_mean = np.concatenate([np.full(19, 200.0), [400.0]]).mean()
-    expected_vol_ratio = 400.0 / expected_vol_mean
+    last_close = close[-1]
+    returns = close[1:] / close[:-1] - 1.0
+    expected_ma5 = close[-5:].mean()
+    expected_ma20 = close[-20:].mean()
+    expected_momentum_10 = last_close / close[-11] - 1.0
+    expected_vol20 = volumes[-20:].mean()
 
     assert feats["feat_ma5_dist"] == pytest.approx(last_close / expected_ma5 - 1.0)
     assert feats["feat_ma20_dist"] == pytest.approx(last_close / expected_ma20 - 1.0)
+    assert feats["feat_ma60_dist"] == pytest.approx(last_close / close[-60:].mean() - 1.0)
+    assert feats["feat_momentum_3"] == pytest.approx(last_close / close[-4] - 1.0)
+    assert feats["feat_momentum_5"] == pytest.approx(last_close / close[-6] - 1.0)
     assert feats["feat_momentum_10"] == pytest.approx(expected_momentum_10)
-    assert feats["feat_volume_ratio"] == pytest.approx(expected_vol_ratio)
+    assert feats["feat_momentum_20"] == pytest.approx(last_close / close[-21] - 1.0)
+    assert feats["feat_momentum_60"] == pytest.approx(last_close / close[-61] - 1.0)
+    assert feats["feat_vol_10"] == pytest.approx(returns[-10:].std())
+    assert feats["feat_vol_30"] == pytest.approx(returns[-30:].std())
+    assert feats["feat_volume_ratio"] == pytest.approx(800.0 / expected_vol20)
+    assert feats["feat_volume_trend"] == pytest.approx(volumes[-5:].mean() / expected_vol20)
+    assert feats["feat_hl_spread_5"] == pytest.approx((((close + 0.5) - (close - 0.5)) / close)[-5:].mean())
 
 
 def test_compute_technical_features_handles_short_history():
@@ -158,5 +172,19 @@ def test_compute_technical_features_handles_short_history():
         "volume": [100.0, 100.0, 100.0], "amount": [1000.0, 1000.0, 1000.0],
     })
     feats = compute_technical_features(df)  # must not raise IndexError with < 5/20/11 rows
-    assert set(feats) == {"feat_ma5_dist", "feat_ma20_dist", "feat_momentum_10", "feat_volume_ratio"}
+    assert set(feats) == {
+        "feat_ma5_dist",
+        "feat_ma20_dist",
+        "feat_ma60_dist",
+        "feat_momentum_3",
+        "feat_momentum_5",
+        "feat_momentum_10",
+        "feat_momentum_20",
+        "feat_momentum_60",
+        "feat_vol_10",
+        "feat_vol_30",
+        "feat_volume_ratio",
+        "feat_volume_trend",
+        "feat_hl_spread_5",
+    }
     assert all(np.isfinite(v) for v in feats.values())

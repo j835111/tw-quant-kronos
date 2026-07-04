@@ -21,10 +21,53 @@ from finetune_tw.backtest_next_open import (
 )
 from finetune_tw.config import Config
 from finetune_tw.db import list_symbols
-from finetune_tw.extract_embeddings import compute_technical_features, extract_embeddings_batch
+from finetune_tw.extract_embeddings import extract_embeddings_batch
+from finetune_tw.feature_engineering import add_cross_sectional_rank_features, compute_technical_features
 from finetune_tw.train_xgb_lambdarank import _TECH_FEATURE_COLUMNS
 
 BATCH_SIZE = 64
+
+
+def _load_model_feature_columns(xgb_model_path: str) -> list[str] | None:
+    summary_path = Path(xgb_model_path).with_suffix(".summary.json")
+    if not summary_path.exists():
+        return None
+    payload = json.loads(summary_path.read_text())
+    feature_columns = payload.get("feature_columns")
+    return list(feature_columns) if feature_columns else None
+
+
+def _require_model_feature_columns(xgb_model_path: str) -> list[str]:
+    feature_columns = _load_model_feature_columns(xgb_model_path)
+    if feature_columns is None:
+        summary_path = Path(xgb_model_path).with_suffix(".summary.json")
+        raise ValueError(
+            "Batch 3 inference requires the adjacent "
+            f"{summary_path.name} sidecar with feature_columns metadata."
+        )
+    return feature_columns
+
+
+def _assemble_feature_matrix(
+    feature_columns: list[str] | None,
+    embeddings: np.ndarray,
+    tech_df: pd.DataFrame,
+) -> np.ndarray:
+    if feature_columns is None:
+        tech_cols = [c for c in _TECH_FEATURE_COLUMNS if c in tech_df.columns]
+        return np.concatenate([embeddings, tech_df[tech_cols].to_numpy(dtype=np.float32)], axis=1)
+
+    col_arrays = []
+    for col in feature_columns:
+        if col.startswith("emb_"):
+            col_arrays.append(embeddings[:, int(col[len("emb_"):])])
+        else:
+            col_arrays.append(tech_df[col].to_numpy(dtype=np.float32))
+    return np.column_stack(col_arrays).astype(np.float32, copy=False)
+
+
+def _needs_cs_rank_features(feature_columns: list[str] | None) -> bool:
+    return feature_columns is not None and any(col.endswith("_cs_rank") for col in feature_columns)
 
 
 def xgb_signals_to_raw_preds(
@@ -47,10 +90,12 @@ def compute_xgb_signals(
     cfg: Config,
     rebal_dates: pd.DatetimeIndex,
     symbols: list[str],
+    feature_columns: list[str] | None = None,
 ) -> dict[str, dict[str, float]]:
     preload_start = (rebal_dates.min() - pd.Timedelta(days=cfg.lookback_window * 2)).strftime("%Y-%m-%d")
     preload_end = rebal_dates.max().strftime("%Y-%m-%d")
     history_frames = load_symbol_history_frames(cfg.db_path, symbols, start=preload_start, end=preload_end)
+    needs_cs_rank = _needs_cs_rank_features(feature_columns)
 
     signals: dict[str, dict[str, float]] = {}
     for i, rebal_date in enumerate(rebal_dates):
@@ -61,18 +106,45 @@ def compute_xgb_signals(
         )
 
         date_scores: dict[str, float] = {}
+        date_embeddings: list[np.ndarray] = []
+        date_rows: list[dict[str, float | str]] = []
+        ordered_syms: list[str] = []
         with torch.no_grad():
             for b in range(0, len(batch_syms), BATCH_SIZE):
                 sub_syms = batch_syms[b:b + BATCH_SIZE]
                 sub_dfs = batch_dfs[b:b + BATCH_SIZE]
                 embeddings = extract_embeddings_batch(predictor, sub_dfs, batch_xts[b:b + BATCH_SIZE])
-                tech_feats = np.array([[compute_technical_features(df)[c] for c in _TECH_FEATURE_COLUMNS]
-                                       for df in sub_dfs], dtype=np.float32)
-                features = np.concatenate([embeddings, tech_feats], axis=1)
-                dmat = xgb.DMatrix(features)
-                preds = booster.predict(dmat)
+                tech_rows = []
+                for sym, ctx_df in zip(sub_syms, sub_dfs):
+                    row = {"date": rebal_date.strftime("%Y-%m-%d"), "symbol": sym}
+                    row.update(compute_technical_features(ctx_df))
+                    tech_rows.append(row)
+
+                if needs_cs_rank:
+                    date_embeddings.append(embeddings)
+                    ordered_syms.extend(sub_syms)
+                    date_rows.extend(tech_rows)
+                    continue
+
+                if not sub_syms:
+                    continue
+
+                tech_df = pd.DataFrame(tech_rows)
+                features = _assemble_feature_matrix(feature_columns, embeddings.astype(np.float32, copy=False), tech_df)
+                preds = booster.predict(xgb.DMatrix(features))
                 for sym, pred in zip(sub_syms, preds):
                     date_scores[sym] = float(pred)
+
+        if needs_cs_rank and ordered_syms:
+            tech_df = add_cross_sectional_rank_features(pd.DataFrame(date_rows))
+            features = _assemble_feature_matrix(
+                feature_columns,
+                np.vstack(date_embeddings).astype(np.float32, copy=False),
+                tech_df,
+            )
+            preds = booster.predict(xgb.DMatrix(features))
+            for sym, pred in zip(ordered_syms, preds):
+                date_scores[sym] = float(pred)
 
         signals[rebal_date.strftime("%Y-%m-%d")] = date_scores
         if (i + 1) % 5 == 0 or i == 0:
@@ -83,6 +155,7 @@ def compute_xgb_signals(
 
 
 def run_backtest_xgb_embedding(cfg: Config, model_key: str, xgb_model_path: str, hold_days_list: list[int], top_k: int) -> Path:
+    feature_columns = _require_model_feature_columns(xgb_model_path)
     specs = build_model_specs(cfg)
     predictor = load_predictor_from_spec(specs[model_key], cfg)
     booster = xgb.Booster()
@@ -97,7 +170,9 @@ def run_backtest_xgb_embedding(cfg: Config, model_key: str, xgb_model_path: str,
     signal_dates = pd.DatetimeIndex(all_signal_dates)
 
     price_frames = _load_price_frames(cfg, symbols, test_end)
-    xgb_preds_by_date = compute_xgb_signals(predictor, booster, cfg, signal_dates, symbols)
+    xgb_preds_by_date = compute_xgb_signals(
+        predictor, booster, cfg, signal_dates, symbols, feature_columns=feature_columns
+    )
     del predictor
     torch.cuda.empty_cache()
 

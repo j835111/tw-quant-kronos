@@ -1,6 +1,9 @@
 """Extract frozen Kronos last-layer hidden states as embeddings for XGBoost ranking (Round 6 / M1).
 
 Kronos is never updated here — this only runs forward passes under torch.no_grad().
+
+Batch 3 production flow should use enrich_round6_features.py rather than this script. This script still
+finishes with a whole-frame late-stage cross-sectional rank pass via add_cross_sectional_rank_features().
 """
 from __future__ import annotations
 
@@ -15,6 +18,8 @@ from finetune_tw.backtest import build_model_specs, load_predictor_from_spec
 from finetune_tw.backtest_data import build_rebalance_inputs, load_symbol_history_frames
 from finetune_tw.config import Config
 from finetune_tw.db import list_symbols
+from finetune_tw.feature_engineering import add_cross_sectional_rank_features, compute_technical_features
+from finetune_tw.trading_calendar import twse_trading_days
 
 BATCH_SIZE = 64
 
@@ -67,27 +72,6 @@ def extract_embeddings_batch(
             pooled = torch.cat(layer_outputs, dim=1)
 
     return pooled.cpu().numpy().astype(np.float32)
-
-
-def compute_technical_features(df: pd.DataFrame) -> dict[str, float]:
-    """Raw technical features as a fallback/complement to the pure Kronos embedding, per
-    improvement-plan.md's open decision point ("純 hidden state vs hidden state + raw features").
-    Computed from the same lookback-window df already passed to extract_embeddings_batch."""
-    close = df["close"].values.astype(np.float64)
-    volume = df["volume"].values.astype(np.float64)
-    last_close = float(close[-1])
-
-    ma5 = float(close[-5:].mean()) if len(close) >= 5 else float(close.mean())
-    ma20 = float(close[-20:].mean()) if len(close) >= 20 else float(close.mean())
-    momentum_10 = float(last_close / close[-11] - 1.0) if len(close) > 10 and close[-11] != 0 else 0.0
-    recent_vol_mean = float(volume[-20:].mean()) if len(volume) >= 20 else float(volume.mean())
-
-    return {
-        "feat_ma5_dist": float(last_close / ma5 - 1.0) if ma5 != 0 else 0.0,
-        "feat_ma20_dist": float(last_close / ma20 - 1.0) if ma20 != 0 else 0.0,
-        "feat_momentum_10": momentum_10,
-        "feat_volume_ratio": float(volume[-1] / recent_vol_mean) if recent_vol_mean != 0 else 1.0,
-    }
 
 
 def _realized_open_to_open_labels(
@@ -163,7 +147,7 @@ def build_embedding_dataset(
             print(f"  [{i + 1}/{len(rebal_dates)}] {rebal_date.date()}: {len(keep_idx)} symbols")
             sys.stdout.flush()
 
-    return pd.DataFrame(rows)
+    return add_cross_sectional_rank_features(pd.DataFrame(rows))
 
 
 def main() -> None:
@@ -181,7 +165,10 @@ def main() -> None:
     predictor = load_predictor_from_spec(specs[args.model], cfg)
 
     symbols = [s for s in list_symbols(cfg.db_path) if s != cfg.benchmark_symbol]
-    rebal_dates = pd.bdate_range(args.start, args.end)
+    all_trading_days = twse_trading_days(cfg.db_path)
+    rebal_dates = pd.DatetimeIndex(
+        [pd.Timestamp(day) for day in sorted(all_trading_days) if args.start <= day <= args.end]
+    )
 
     df = build_embedding_dataset(cfg, predictor, symbols, rebal_dates, args.horizon)
     df.to_parquet(args.out, index=False)

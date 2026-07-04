@@ -6,11 +6,12 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 
+from finetune_tw.feature_engineering import TECH_FEATURE_COLUMNS, technical_feature_columns
 from finetune_tw.ic_validation import rank_ic
 from finetune_tw.lambdarank_ic import lambdarank_ic_objective
 
 EMBEDDING_PREFIX = "emb_"
-_TECH_FEATURE_COLUMNS = ["feat_ma5_dist", "feat_ma20_dist", "feat_momentum_10", "feat_volume_ratio"]
+_TECH_FEATURE_COLUMNS = TECH_FEATURE_COLUMNS
 
 
 def build_group_sizes(df: pd.DataFrame, date_col: str = "date") -> list[int]:
@@ -32,7 +33,7 @@ def rank_ic_eval_metric(preds: np.ndarray, dtrain, group_sizes: list[int]) -> fl
 def _feature_columns(df: pd.DataFrame) -> list[str]:
     emb_cols = sorted([c for c in df.columns if c.startswith(EMBEDDING_PREFIX)],
                       key=lambda c: int(c[len(EMBEDDING_PREFIX):]))
-    tech_cols = [c for c in _TECH_FEATURE_COLUMNS if c in df.columns]
+    tech_cols = technical_feature_columns(df.columns)
     return emb_cols + tech_cols
 
 

@@ -12,42 +12,34 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
+from finetune_tw.feature_engineering import technical_feature_columns
 from finetune_tw.ic_validation import rank_ic
-from finetune_tw.train_xgb_lambdarank import _TECH_FEATURE_COLUMNS, _feature_columns
+from finetune_tw.trading_calendar import twse_trading_days
+from finetune_tw.train_xgb_lambdarank import EMBEDDING_PREFIX
 
 ARTIFACT_DIR = Path("finetune_tw/outputs/tw_daily/round6_artifacts")
 
 
-def twse_trading_days(db_path, benchmark_symbol: str = "^TWII", min_symbols: int = 500) -> set[str]:
-    """Real TWSE trading days = dates with a benchmark row AND >= min_symbols stock rows.
-
-    Either criterion alone is dirty in tw_stocks.db: the benchmark has a spurious row on
-    2025-08-01 (only 11 stocks that day), while typhoon closure days (e.g. 2016-09-27/28)
-    have provider-emitted stock rows but correctly no benchmark row. The intersection
-    drops both failure modes.
-    """
-    conn = sqlite3.connect(db_path)
-    try:
-        bench = {
-            r[0] for r in conn.execute(
-                "SELECT DISTINCT date FROM daily_prices WHERE symbol = ?", (benchmark_symbol,)
-            )
-        }
-        busy = {
-            r[0] for r in conn.execute(
-                "SELECT date FROM daily_prices GROUP BY date HAVING COUNT(*) >= ?", (min_symbols,)
-            )
-        }
-    finally:
-        conn.close()
-    return bench & busy
+def feature_set_columns(all_columns: list[str], feature_set: str) -> list[str]:
+    """Column list for a named ablation feature set, in the training order
+    (embeddings sorted numerically, then the raw technical features)."""
+    emb_cols = sorted([c for c in all_columns if c.startswith(EMBEDDING_PREFIX)],
+                      key=lambda c: int(c[len(EMBEDDING_PREFIX):]))
+    tech_cols = technical_feature_columns(all_columns)
+    if feature_set == "full":
+        return emb_cols + tech_cols
+    if feature_set == "emb":
+        return emb_cols
+    if feature_set == "raw":
+        return tech_cols
+    raise ValueError(f"unknown feature set: {feature_set}")
 
 
 def _date_strings(series: pd.Series) -> pd.Series:
@@ -56,38 +48,167 @@ def _date_strings(series: pd.Series) -> pd.Series:
     return series.astype(str).str.slice(0, 10)
 
 
+def batch_to_matrix(batch, feat_cols: list[str], row_idx: np.ndarray | None = None) -> np.ndarray:
+    """Arrow RecordBatch -> float32 feature matrix, column by column.
+
+    ~28x faster than batch.to_pandas()[feat_cols].to_numpy() for 800+ columns (pandas
+    block consolidation dominates there). Columns are looked up by name because
+    iter_batches returns them in schema order, not request order.
+    """
+    name_to_idx = {name: i for i, name in enumerate(batch.schema.names)}
+    n_rows = len(row_idx) if row_idx is not None else batch.num_rows
+    x = np.empty((n_rows, len(feat_cols)), dtype=np.float32)
+    for j, name in enumerate(feat_cols):
+        col = batch.column(name_to_idx[name]).to_numpy(zero_copy_only=False)
+        x[:, j] = col[row_idx] if row_idx is not None else col
+    return x
+
+
+def projected_score_columns(all_columns: list[str]) -> list[str]:
+    """Columns that may be decoded into pandas / written to scored parquet."""
+    ordered = [
+        "date",
+        "symbol",
+        "label",
+        *technical_feature_columns(all_columns),
+    ]
+    seen = set()
+    projected = []
+    for col in ordered:
+        if col in all_columns and col not in seen:
+            projected.append(col)
+            seen.add(col)
+    return projected
+
+
+def score_read_columns(all_columns: list[str], feat_cols: list[str]) -> list[str]:
+    """Columns needed in the Arrow batch to build features and output rows."""
+    ordered = [
+        "date",
+        "symbol",
+        "label",
+        *technical_feature_columns(all_columns),
+        *feat_cols,
+    ]
+    seen = set()
+    projected = []
+    for col in ordered:
+        if col in all_columns and col not in seen:
+            projected.append(col)
+            seen.add(col)
+    return projected
+
+
+def stream_scored_batches(
+    parquet_path,
+    booster,
+    trading_days: set[str],
+    iteration_ranges: dict[str, tuple[int, int]],
+    batch_size: int = 40_000,
+    feat_cols: list[str] | None = None,
+):
+    """Backward-compatible alias for the streaming public scorer."""
+    yield from stream_scores(
+        parquet_path,
+        booster,
+        trading_days,
+        iteration_ranges,
+        batch_size=batch_size,
+        feat_cols=feat_cols,
+    )
+
+
 def stream_scores(
     parquet_path,
     booster,
     trading_days: set[str],
     iteration_ranges: dict[str, tuple[int, int]],
     batch_size: int = 40_000,
-) -> pd.DataFrame:
-    """Filter to real trading days and predict, one record batch at a time.
-
-    Returns a small frame: date, symbol, label, the raw tech features, and one score
-    column per entry in iteration_ranges.
-    """
+    feat_cols: list[str] | None = None,
+):
+    """Yield filtered, scored batch-sized frames without decoding emb_* into pandas."""
     pf = pq.ParquetFile(parquet_path)
-    feat_cols = None
-    keep = ["date", "symbol", "label", *_TECH_FEATURE_COLUMNS]
-    outs = []
-    for batch in pf.iter_batches(batch_size=batch_size):
-        chunk = batch.to_pandas()
-        if feat_cols is None:
-            feat_cols = _feature_columns(chunk)
+    if feat_cols is None:
+        feat_cols = feature_set_columns(pf.schema_arrow.names, "full")
+    read_cols = score_read_columns(pf.schema_arrow.names, feat_cols)
+    output_cols = projected_score_columns(pf.schema_arrow.names)
+    for batch in pf.iter_batches(batch_size=batch_size, columns=read_cols):
+        chunk = batch.select(output_cols).to_pandas()
         dates = _date_strings(chunk["date"])
         mask = dates.isin(trading_days)
         if not mask.any():
             continue
-        sub = chunk.loc[mask]
-        x = sub[feat_cols].to_numpy(dtype=np.float32)
-        rec = sub[keep].copy()
+        row_idx = np.flatnonzero(mask.to_numpy())
+        x = batch_to_matrix(batch, feat_cols, row_idx=row_idx)
+        rec = chunk.loc[mask].copy()
         rec["date"] = dates.loc[mask]
         for name, it_range in iteration_ranges.items():
             rec[name] = booster.inplace_predict(x, iteration_range=it_range)
-        outs.append(rec)
-    return pd.concat(outs, ignore_index=True)
+        yield rec.reset_index(drop=True)
+
+
+def iter_scored_dates(scored_batches) -> pd.DataFrame:
+    """Yield one fully completed scored date at a time when each date is a single contiguous run."""
+    pending: pd.DataFrame | None = None
+    emitted_dates: set[str] = set()
+    for batch in scored_batches:
+        if batch.empty:
+            continue
+        batch_dates = _date_strings(batch["date"]).reset_index(drop=True)
+        batch = batch.copy()
+        batch["date"] = batch_dates
+        combined = batch if pending is None else pd.concat([pending, batch], ignore_index=True)
+        dates = combined["date"].to_numpy()
+        start = 0
+        pending = None
+        while start < len(combined):
+            date = dates[start]
+            end = start + 1
+            while end < len(combined) and dates[end] == date:
+                end += 1
+            date_frame = combined.iloc[start:end].reset_index(drop=True)
+            is_last = end == len(combined)
+            if date in emitted_dates:
+                raise ValueError("scored batch dates must appear in one contiguous run")
+            if is_last:
+                pending = date_frame
+            else:
+                emitted_dates.add(date)
+                yield date_frame
+            start = end
+    if pending is not None and not pending.empty:
+        date = pending["date"].iloc[0]
+        if date in emitted_dates:
+            raise ValueError("scored batch dates must appear in one contiguous run")
+        yield pending.reset_index(drop=True)
+
+
+def _concat_frames(parts: list[pd.DataFrame], columns: list[str]) -> pd.DataFrame:
+    if not parts:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(parts, ignore_index=True)
+
+
+def _write_scored_frame(
+    writer: pq.ParquetWriter | None,
+    path: Path,
+    frame: pd.DataFrame,
+) -> pq.ParquetWriter:
+    table = pa.Table.from_pandas(frame, preserve_index=False)
+    if writer is None:
+        writer = pq.ParquetWriter(path, table.schema)
+    writer.write_table(table)
+    return writer
+
+
+def _empty_aggregate_row() -> dict[str, float]:
+    return {
+        "mean_ic": np.nan,
+        "ic_ir": np.nan,
+        "pct_ic_pos": np.nan,
+        "mean_top_excess": np.nan,
+        "mean_overlap": np.nan,
+    }
 
 
 def per_day_metrics(
@@ -145,8 +266,13 @@ def main() -> None:
     parser.add_argument("--model", default=str(ARTIFACT_DIR / "xgb_round6.json"))
     parser.add_argument("--db", default="finetune_tw/data/tw_stocks.db")
     parser.add_argument("--out-dir", default=str(ARTIFACT_DIR))
-    parser.add_argument("--best-iteration", type=int, default=190,
-                        help="Round 6 best_iteration from the training log (docs/round6_artifact_evaluation.md)")
+    parser.add_argument("--best-iteration", type=int, default=None,
+                        help="Defaults to the model's stored best_iteration; Round 6's is 190 "
+                             "(docs/round6_artifact_evaluation.md)")
+    parser.add_argument("--features", choices=["full", "emb", "raw"], default="full",
+                        help="Feature set the model was trained on (for ablation models)")
+    parser.add_argument("--prefix", default="round6_test",
+                        help="Output filename prefix, e.g. round6_clean_test for the Batch-2 baseline")
     parser.add_argument("--top-k", type=int, default=10)
     args = parser.parse_args()
 
@@ -158,25 +284,72 @@ def main() -> None:
 
     booster = xgb.Booster()
     booster.load_model(args.model)
-    iteration_ranges = {
-        "score_full": (0, 0),  # all trees
-        "score_best": (0, args.best_iteration + 1),
-    }
+    best_iteration = args.best_iteration
+    if best_iteration is None:
+        best_iteration = getattr(booster, "best_iteration", None)
+    iteration_ranges = {"score_full": (0, 0)}  # all trees
+    if best_iteration is not None:
+        iteration_ranges["score_best"] = (0, int(best_iteration) + 1)
 
-    scored = stream_scores(args.parquet, booster, days, iteration_ranges)
-    n_dates = scored["date"].nunique()
-    print(f"scored {len(scored)} rows on {n_dates} real trading days", flush=True)
-    scored.to_parquet(out_dir / "round6_test_scores.parquet", index=False)
+    parquet_columns = pq.ParquetFile(args.parquet).schema_arrow.names
+    feat_cols = feature_set_columns(parquet_columns, args.features)
+    raw_feat_cols = technical_feature_columns(parquet_columns)
+    score_cols = list(iteration_ranges)
+    metric_columns = [
+        "date",
+        "n",
+        "rank_ic",
+        "top_mean",
+        "universe_mean",
+        "top_excess",
+        "overlap_topk",
+    ]
+    score_daily_parts = {score_col: [] for score_col in score_cols}
+    feat_daily_parts = {feat: [] for feat in raw_feat_cols}
+    n_rows = 0
+    n_dates = 0
+    writer: pq.ParquetWriter | None = None
+    scores_path = out_dir / f"{args.prefix}_scores.parquet"
 
-    summary: dict = {"n_rows": len(scored), "n_dates": n_dates, "top_k": args.top_k}
-    for score_col in iteration_ranges:
-        daily = per_day_metrics(scored, score_col=score_col, top_k=args.top_k)
-        daily.to_csv(out_dir / f"round6_test_daily_{score_col}.csv", index=False)
+    try:
+        scored_batches = stream_scores(
+            args.parquet,
+            booster,
+            days,
+            iteration_ranges,
+            feat_cols=feat_cols,
+        )
+        for scored_date in iter_scored_dates(scored_batches):
+            n_rows += len(scored_date)
+            n_dates += 1
+            writer = _write_scored_frame(writer, scores_path, scored_date)
+            for score_col in score_cols:
+                daily = per_day_metrics(scored_date, score_col=score_col, top_k=args.top_k)
+                if not daily.empty:
+                    score_daily_parts[score_col].append(daily)
+            for feat in feat_daily_parts:
+                daily = per_day_metrics(scored_date, score_col=feat, top_k=args.top_k)
+                if not daily.empty:
+                    feat_daily_parts[feat].append(daily)
+    finally:
+        if writer is not None:
+            writer.close()
+
+    print(f"scored {n_rows} rows on {n_dates} real trading days", flush=True)
+
+    summary: dict = {"n_rows": n_rows, "n_dates": n_dates, "top_k": args.top_k}
+    for score_col in score_cols:
+        daily = _concat_frames(score_daily_parts[score_col], metric_columns)
+        daily.to_csv(out_dir / f"{args.prefix}_daily_{score_col}.csv", index=False)
         for freq, tag in (("Q", "quarterly"), ("M", "monthly")):
             agg = aggregate_period(daily, freq=freq)
-            agg.to_csv(out_dir / f"round6_test_{tag}_{score_col}.csv", index=False)
+            agg.to_csv(out_dir / f"{args.prefix}_{tag}_{score_col}.csv", index=False)
+        if daily.empty:
+            summary[score_col] = _empty_aggregate_row()
+            print(f"[{score_col}] no daily metrics produced", flush=True)
+            continue
         overall = aggregate_period(daily.assign(date="2099-01-01"), freq="Y").iloc[0]
-        summary[score_col] = {
+        summary[score_col] = _empty_aggregate_row() | {
             "mean_ic": overall["mean_ic"],
             "ic_ir": overall["ic_ir"],
             "pct_ic_pos": overall["pct_ic_pos"],
@@ -188,14 +361,19 @@ def main() -> None:
               f"overlap {overall['mean_overlap'] * 100:.2f}%", flush=True)
 
     feat_quarters = {}
-    for feat in _TECH_FEATURE_COLUMNS:
-        daily = per_day_metrics(scored, score_col=feat, top_k=args.top_k)
-        agg = aggregate_period(daily, freq="Q")
-        feat_quarters[feat] = agg
-    feat_table = pd.concat(feat_quarters, names=["feature"]).reset_index(level=0)
-    feat_table.to_csv(out_dir / "round6_test_feature_quarterly.csv", index=False)
+    for feat, parts in feat_daily_parts.items():
+        daily = _concat_frames(parts, metric_columns)
+        feat_quarters[feat] = aggregate_period(daily, freq="Q")
+    if feat_quarters:
+        feat_table = pd.concat(feat_quarters, names=["feature"]).reset_index(level=0)
+    else:
+        feat_table = pd.DataFrame(
+            columns=["feature", "period", "days", "mean_ic", "ic_ir", "pct_ic_pos",
+                     "mean_top_excess", "mean_overlap", "universe_mean_label"]
+        )
+    feat_table.to_csv(out_dir / f"{args.prefix}_feature_quarterly.csv", index=False)
 
-    with open(out_dir / "round6_test_diagnostics.json", "w") as f:
+    with open(out_dir / f"{args.prefix}_diagnostics.json", "w") as f:
         json.dump(summary, f, indent=2, default=float)
     print(f"outputs written to {out_dir}", flush=True)
 
