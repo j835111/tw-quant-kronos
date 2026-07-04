@@ -150,6 +150,13 @@ def build_embedding_dataset(
     return add_cross_sectional_rank_features(pd.DataFrame(rows))
 
 
+def _select_symbols(symbols: list[str], max_symbols: int | None) -> list[str]:
+    """Deterministically truncate the (already-sorted) symbol universe for small-scale local runs."""
+    if max_symbols is None:
+        return symbols
+    return symbols[:max_symbols]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="finetune_tw/configs/config_tw_daily.yaml")
@@ -158,6 +165,10 @@ def main() -> None:
     parser.add_argument("--end", required=True)
     parser.add_argument("--horizon", type=int, default=5)
     parser.add_argument("--out", required=True)
+    parser.add_argument(
+        "--max-symbols", type=int, default=None,
+        help="Truncate the symbol universe to the first N (sorted by ticker) for quick local CPU sampling.",
+    )
     args = parser.parse_args()
 
     cfg = Config.from_yaml(args.config)
@@ -165,6 +176,7 @@ def main() -> None:
     predictor = load_predictor_from_spec(specs[args.model], cfg)
 
     symbols = [s for s in list_symbols(cfg.db_path) if s != cfg.benchmark_symbol]
+    symbols = _select_symbols(symbols, args.max_symbols)
     all_trading_days = twse_trading_days(cfg.db_path)
     rebal_dates = pd.DatetimeIndex(
         [pd.Timestamp(day) for day in sorted(all_trading_days) if args.start <= day <= args.end]

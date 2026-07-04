@@ -657,3 +657,32 @@ Batch 1 到 Batch 3c 全程用的 embedding，都來自 **`--model pretrained`**
 **這代表 Batch 3c `full` 的 Sharpe 1.336，是建立在「完全沒有針對 TW 股價微調過」的 Kronos backbone 之上。** 理論上換成微調過的 round0（甚至更後面的 round1-5）backbone 重新走一次「抽 embedding → 方案 B/C 特徵工程 → rank_ic 早停 + 多 regime 驗證 → XGBoost 訓練」的完整流程，有機會拿到品質更好的 embedding，進一步推高 IC 與真實回測表現——**但這件事從未被驗證過，屬於全新的、尚未排入 Batch 1-4 序列的實驗方向**，可以視為「方案 A 的變體」（不是改 pooling 方式，而是換 embedding 來源本身）。
 
 **成本考量**：這需要對測試期（甚至 train/val 全歷史）重新做一次完整的 GPU embedding 抽取（Round 6 最貴的步驟，A40 多進程平行需數小時），且新舊 embedding 不可混用，等於重跑一次 Batch 1-3c 全流程。在沒有先驗證「round0 embedding 是否真的比 pretrained embedding 承載更多對 top-tail 有用的訊號」之前，不建議貿然投入——可以先用**小規模抽樣**（例如只抽測試期，跑一次 diagnostics-only 的 IC 對照，不必重跑完整訓練）驗證訊號品質是否有感提升，再決定是否值得投入全量重抽。
+
+### 小規模本機 CPU smoketest 結果（2026-07-04）
+
+為了不必開 GPU pod 就能先看方向，在 `extract_embeddings.py` 加了 `--max-symbols` 參數（截取排序後前 N 檔股票），
+在本機 8 核 / 8GB RAM 純 CPU 環境跑了一次完整迷你流程（抽 embedding → `train_xgb_streaming.py` rank_ic 早停訓練
+→ `round6_diagnostics.py`），`pretrained` 和 `round0` backbone 各跑一次，其餘完全同條件：
+
+| 項目 | 值 |
+|---|---|
+| 股票池 | 20 檔（`list_symbols()` 排序後前 20 檔，非隨機抽樣） |
+| Train 期間 | 2025-07-01 ~ 2025-12-30（125 個交易日，2500 rows） |
+| Test 期間 | 2026-01-05 ~ 2026-06-17（107 個交易日，2140 rows） |
+| horizon / features | 5（同 hold_days）/ `full`（858 維） |
+| 總耗時 | 兩個 backbone 合計約 25 分鐘，全程 CPU，無需 GPU |
+
+**Diagnostics 結果（test 期，`score_best` = best_iteration 那組）：**
+
+| Backbone | best_iteration | val rank_ic (訓練時) | mean IC | IC-IR | top-10 excess | top-10 overlap |
+|---|---:|---:|---:|---:|---:|---:|
+| `pretrained`（未微調） | 51 | 0.2348 | **0.2284~0.2348** | **0.708~0.711** | +0.647%~+0.674% | 60% |
+| `round0`（TW 微調過） | 28 | 0.1356 | 0.1289~0.1356 | 0.357~0.406 | +0.376%~+0.385% | 55% |
+
+**結論：在這個小規模抽樣下，`pretrained` backbone 在所有 IC 指標上都明顯優於 `round0`，方向與原先設想的「微調過的 backbone 應該更好」相反。** 推測 round0 的微調目標（單一模型的 open-to-open 回歸/排序 loss）把 embedding 空間收斂到對它自己任務有利、但對 XGBoost 下游做「跨股票排名」用的通用特徵反而較不豐富的表示；pretrained 因為沒有針對任何特定下游任務優化，保留了更多可供 XGBoost 自行學習排序權重的原始資訊。
+
+**重要限制（不可直接套用到生產結論）**：
+- 股票池僅 20 檔（非 1091 檔全市場），cross-sectional 統計量（IC、overlap）在小樣本下變異度本來就大，數值全面高於 Batch 3c 全量結果（mean IC 0.09）不代表訊號真的更強，只能看兩個 backbone 之間的**相對高低**。
+- Train/test 窗口各只涵蓋半年多，未做多 regime 驗證，也未跑真實 next-open 回測。
+
+**後續建議**：基於這個方向性訊號，round0+ backbone 路線的優先權下修——如果之後仍想驗證，建議先擴大股票池抽樣規模（例如 100-200 檔）並延長窗口做第二輪 CPU smoketest，再決定是否值得投入 GPU 全量重跑。

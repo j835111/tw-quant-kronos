@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from model.kronos import Kronos, KronosTokenizer, KronosPredictor
-from finetune_tw.extract_embeddings import compute_technical_features, extract_embeddings_batch
+from finetune_tw.extract_embeddings import _select_symbols, compute_technical_features, extract_embeddings_batch
 
 
 def _make_tiny_predictor() -> KronosPredictor:
@@ -122,6 +122,16 @@ def test_extract_embeddings_batch_distinguishes_different_inputs():
     df_list = [_make_df_with_shape("uptrend"), _make_df_with_shape("oscillating")]
     embeddings = extract_embeddings_batch(predictor, df_list, [x_ts, x_ts])
     assert not np.allclose(embeddings[0], embeddings[1])
+
+
+def test_select_symbols_none_returns_full_universe():
+    symbols = ["1101", "2330", "2454"]
+    assert _select_symbols(symbols, None) == symbols
+
+
+def test_select_symbols_truncates_to_first_n_sorted():
+    symbols = ["1101", "1102", "2330", "2454"]
+    assert _select_symbols(symbols, 2) == ["1101", "1102"]
 
 
 def test_compute_technical_features_matches_hand_calculation():
