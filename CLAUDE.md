@@ -26,6 +26,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `feature/` 和 `fix/` 完工後合併，刪除分支。
 - 結束一個 `research/` 分支前，先確認 TSV 和 round-history 已在 master 更新（不論是否合併），再開下一輪。
 
+## Documentation Rules
+
+文件導覽入口是 `docs/README.md`，新增或搬移文件後必須同步更新它。分類規則（2026-07-06 起）：
+
+| 位置 | 放什麼 | 規則 |
+|------|--------|------|
+| `docs/kronos-tw-round-history.md` | 每輪實驗的摘要、結論、方法對照表 | **唯一歷史主軸**。每輪結束時在此新增章節；細節寫深度報告，這裡只留結論與連結 |
+| `docs/research/` | 單輪/單主題深度報告（完整診斷、實驗記錄） | 檔名以對應輪次開頭（如 `round6-*.md`）；必須被 round-history 引用 |
+| `docs/research-directions/` | 未來方向、外部調研、文獻整理 | 尚未動工的方向放這裡；開始驗證後結論記入 round-history |
+| `docs/superpowers/plans/`、`specs/` | 開發任務的執行計劃與設計文件 | 檔名以 `YYYY-MM-DD-` 開頭 |
+| `docs/TRADING_GUIDE.md` | 實盤操作指南 | production 策略變更時同步更新 |
+| `autoresearch/improve-*/` | `/autoresearch:improve` 產出的計劃與 PRD | **原地保留、不搬移**（round-history 以路徑引用）；驗證結果記入 `autoresearch/README.md` 的對照表 |
+
+通用規則：
+- 文件間互相引用一律用 repo 相對路徑（如 `docs/research/xxx.md`），搬移檔案時用 `git mv` 並全 repo grep 舊路徑修正引用。
+- 不在 docs 根目錄新增未分類的 `.md`；不確定歸屬時預設放 `docs/research/`。
+
 ## Commands
 
 ### Install
