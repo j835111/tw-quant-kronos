@@ -1,337 +1,101 @@
-<div align="center">
-  <h2><b>Kronos: A Foundation Model for the Language of Financial Markets </b></h2>
-</div>
+# tw-quant-kronos
 
+台股量化研究專案 — 以 [Kronos](https://github.com/shiyu-coder/Kronos)(AAAI 2026,金融 K 線基礎模型)為底層,對台股日線資料 fine-tune,並建立回測與每日選股信號的完整 pipeline。
 
-<div align="center">
+> 本 repo fork 自 `shiyu-coder/Kronos`,但主軸已轉為台股量化研究;上游模型程式碼(`model/`)以 vendored library 形式保留並持續沿用。上游原始說明見 [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md)。
 
-</a> 
-<a href="https://huggingface.co/NeoQuasar"> 
-<img src="https://img.shields.io/badge/🤗-Hugging_Face-yellow" alt="Hugging Face"> 
-</a> 
-<a href="https://shiyu-coder.github.io/Kronos-demo/"> <img src="https://img.shields.io/badge/🚀-Live_Demo-brightgreen" alt="Live Demo"> </a>
-<a href="https://github.com/shiyu-coder/Kronos/graphs/commit-activity"> 
-<img src="https://img.shields.io/github/last-commit/shiyu-coder/Kronos?color=blue" alt="Last Commit"> 
-</a> 
-<a href="https://github.com/shiyu-coder/Kronos/stargazers"> 
-<img src="https://img.shields.io/github/stars/shiyu-coder/Kronos?color=lightblue" alt="GitHub Stars"> 
-</a> 
-<a href="https://github.com/shiyu-coder/Kronos/network/members"> 
-<img src="https://img.shields.io/github/forks/shiyu-coder/Kronos?color=yellow" alt="GitHub Forks"> 
-</a> 
-<a href="./LICENSE"> 
-<img src="https://img.shields.io/github/license/shiyu-coder/Kronos?color=green" alt="License"> 
-</a>
+## 現行 Production 基準
 
-</div>
+| 項目 | 值 |
+|------|-----|
+| 模型 | Kronos-base fine-tune(`j835111/kronos-tw-finetune`)+ XGBoost full/raw 雙模型 |
+| 融合方式 | 靜態 Z-Score ensemble,`w = 0.6` |
+| 策略參數 | `top_k = 10` |
+| 回測 Sharpe | **1.5434**(Round 6 Direction 2,取代先前所有版本) |
+| 每日信號 | `scripts/run_signal_today_ensemble.sh` |
 
-<div align="center">
-  <!-- Keep these links. Translations will automatically update with the README. -->
-  <a href="https://zdoc.app/de/shiyu-coder/Kronos">Deutsch</a> | 
-  <a href="https://zdoc.app/es/shiyu-coder/Kronos">Español</a> | 
-  <a href="https://zdoc.app/fr/shiyu-coder/Kronos">Français</a> | 
-  <a href="https://zdoc.app/ja/shiyu-coder/Kronos">日本語</a> | 
-  <a href="https://zdoc.app/ko/shiyu-coder/Kronos">한국어</a> | 
-  <a href="https://zdoc.app/pt/shiyu-coder/Kronos">Português</a> | 
-  <a href="https://zdoc.app/ru/shiyu-coder/Kronos">Русский</a> | 
-  <a href="https://zdoc.app/zh/shiyu-coder/Kronos">中文</a>
-</div>
+```bash
+# 每日信號產生(更新 DB → 產出選股清單)
+bash scripts/run_signal_today_ensemble.sh
 
-<p align="center">
+# 舊版單模型信號(Round 0 baseline)
+bash scripts/run_signal_today.sh
+```
 
-<img src="./figures/logo.png" width="100">
+## 專案結構
 
-</p>
+| 目錄 | 內容 | 來源 |
+|------|------|------|
+| `finetune_tw/` | 台股 pipeline:資料下載(TWSE → SQLite)、tokenizer/predictor fine-tune、回測、grid search、每日信號 | 本專案 |
+| `scripts/` | 每日信號腳本、訓練輔助腳本 | 本專案 |
+| `autoresearch/` | 迭代優化實驗紀錄與評估結果(`tw-evals/finetune-tw-results.tsv`) | 本專案 |
+| `docs/` | 研究歷程(`kronos-tw-round-history.md`)、實驗計畫、上游 README | 本專案 |
+| `tests/` | 回歸測試與 `finetune_tw` 單元測試 | 本專案擴充 |
+| `model/` | Kronos 核心模型(tokenizer + autoregressive Transformer),含本地修補 | 上游(vendored) |
+| `finetune/`, `finetune_csv/`, `examples/`, `webui/`, `figures/` | 上游原始 pipeline 與範例,未修改 | 上游 |
 
-> Kronos is the **first open-source foundation model** for financial candlesticks (K-lines), 
-> trained on data from over **45 global exchanges**.
+## 快速開始(台股 pipeline)
 
-
-</div>
-
-## 📰 News
-*   🚩 **[2025.11.10]** Kronos has been accpeted by AAAI 2026.
-*   🚩 **[2025.08.17]** We have released the scripts for fine-tuning! Check them out to adapt Kronos to your own tasks.
-*   🚩 **[2025.08.02]** Our paper is now available on [arXiv](https://arxiv.org/abs/2508.02739)!
-
-<p align="center">
-
-## 📜 Introduction
-
-**Kronos** is a family of decoder-only foundation models, pre-trained specifically for the "language" of financial markets—K-line sequences. Unlike general-purpose TSFMs, Kronos is designed to handle the unique, high-noise characteristics of financial data. It leverages a novel two-stage framework: 
-1. A specialized tokenizer first quantizes continuous, multi-dimensional K-line data (OHLCV) into **hierarchical discrete tokens**. 
-2. A large, autoregressive Transformer is then pre-trained on these tokens, enabling it to serve as a unified model for diverse quantitative tasks.
-
-<p align="center">
-    <img src="figures/overview.png" alt="" align="center" width="700px" />
-</p>
-
-## ✨ Live Demo 
-We have set up a live demo to visualize Kronos's forecasting results. The webpage showcases a forecast for the **BTC/USDT** trading pair over the next 24 hours. 
-
-**👉 [Access the Live Demo Here](https://shiyu-coder.github.io/Kronos-demo/)** 
-
-## 📦 Model Zoo 
-We release a family of pre-trained models with varying capacities to suit different computational and application needs. All models are readily accessible from the Hugging Face Hub.
-
-| Model        | Tokenizer                                                                       | Context length | Params  | Open-source                                                               |
-|--------------|---------------------------------------------------------------------------------| -------------- | ------ |---------------------------------------------------------------------------|
-| Kronos-mini  | [Kronos-Tokenizer-2k](https://huggingface.co/NeoQuasar/Kronos-Tokenizer-2k)     | 2048           | 4.1M   | ✅ [NeoQuasar/Kronos-mini](https://huggingface.co/NeoQuasar/Kronos-mini)  |
-| Kronos-small | [Kronos-Tokenizer-base](https://huggingface.co/NeoQuasar/Kronos-Tokenizer-base) | 512            | 24.7M  | ✅ [NeoQuasar/Kronos-small](https://huggingface.co/NeoQuasar/Kronos-small) |
-| Kronos-base  | [Kronos-Tokenizer-base](https://huggingface.co/NeoQuasar/Kronos-Tokenizer-base) | 512            | 102.3M | ✅ [NeoQuasar/Kronos-base](https://huggingface.co/NeoQuasar/Kronos-base)   |
-| Kronos-large | [Kronos-Tokenizer-base](https://huggingface.co/NeoQuasar/Kronos-Tokenizer-base) | 512            | 499.2M | ❌                                                                         |
-
-
-## 🚀 Getting Started
-
-### Installation
-
-1. Install Python 3.10+, and then install the dependencies:
-
-```shell
+```bash
 pip install -r requirements.txt
+
+CONFIG=finetune_tw/configs/config_tw_daily.yaml
+
+# 1. 下載/更新台股日線資料(SQLite)
+python -m finetune_tw.download_data --config $CONFIG            # 首次
+python -m finetune_tw.download_data --config $CONFIG --update   # 增量
+
+# 2. Fine-tune(tokenizer → predictor)
+python -m finetune_tw.train_tokenizer --config $CONFIG
+python -m finetune_tw.train_predictor --config $CONFIG
+
+# 3. 回測(top-K hold 策略)
+python -m finetune_tw.backtest --config $CONFIG
+
+# 4. 策略參數 grid search(推論一次,CPU sweep)
+python -m finetune_tw.grid_search_backtest --config $CONFIG --model round0 \
+    --top_k_list 10 20 30 50 --hold_days_list 3 5 7 10
 ```
 
-### 📈 Making Forecasts
+訓練環境選擇(config 對應硬體):
 
-Forecasting with Kronos is straightforward using the `KronosPredictor` class. It handles data preprocessing, normalization, prediction, and inverse normalization, allowing you to get from raw data to forecasts in just a few lines of code.
+| 環境 | Config |
+|------|--------|
+| MoLab RTX Pro 6000(96 GB) | `config_tw_daily_rtx6000.yaml`(bf16) |
+| Colab T4(16 GB) | `config_tw_daily_t4.yaml`(fp16 + GradScaler) |
+| 其他 / 安全預設 | `config_tw_daily.yaml` |
 
-**Important Note**: The `max_context` for `Kronos-small` and `Kronos-base` is **512**. This is the maximum sequence length the model can process. For optimal performance, it is recommended that your input data length (i.e., `lookback`) does not exceed this limit. The `KronosPredictor` will automatically handle truncation for longer contexts.
+Colab 流程見 `finetune_tw/colab_setup.ipynb`;MoLab 流程見 `finetune_tw/molab_train.py` 與 `CLAUDE.md`。
 
-Here is a step-by-step guide to making your first forecast.
+## 研究歷程
 
-#### 1. Load the Tokenizer and Model
+完整輪次歷史與結論記錄在:
 
-First, load a pre-trained Kronos model and its corresponding tokenizer from the Hugging Face Hub.
+- [`docs/kronos-tw-round-history.md`](docs/kronos-tw-round-history.md) — 各輪實驗敘述與決策
+- [`autoresearch/tw-evals/finetune-tw-results.tsv`](autoresearch/tw-evals/finetune-tw-results.tsv) — 回測指標總表
 
-```python
-from model import Kronos, KronosTokenizer, KronosPredictor
+重點結論:
 
-# Load from Hugging Face Hub
-tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
-model = Kronos.from_pretrained("NeoQuasar/Kronos-small")
-```
+- **策略參數的影響遠大於 retraining**(Round 0 + grid search 即達 Sharpe 1.84 in-sample)。
+- Round 6 Direction 2:Kronos 信號與 XGBoost(full/raw 特徵)做靜態 Z-Score 融合,`w=0.6` 為現行 production(Sharpe 1.5434)。
+- Stacking、MC dropout、backbone 替換(Direction 1)、rank horizon 解耦等方向均已驗證無效或有害,詳見 round history。
 
-#### 2. Instantiate the Predictor
+## 底層模型:Kronos
 
-Create an instance of `KronosPredictor`, passing the model, tokenizer, and desired device.
+Kronos 是 decoder-only 的金融 K 線基礎模型,以 45+ 交易所資料預訓練,採兩階段架構:tokenizer 將 OHLCV 量化為離散 token,再由自回歸 Transformer 預測。發表於 AAAI 2026([arXiv:2508.02739](https://arxiv.org/abs/2508.02739))。
 
-```python
-# Initialize the predictor
-predictor = KronosPredictor(model, tokenizer, max_context=512)
-```
+| Model | Tokenizer | Context | Params |
+|-------|-----------|---------|--------|
+| Kronos-mini | Kronos-Tokenizer-2k | 2048 | 4.1M |
+| Kronos-small | Kronos-Tokenizer-base | 512 | 24.7M |
+| Kronos-base | Kronos-Tokenizer-base | 512 | 102.3M |
 
-#### 3. Prepare Input Data
+預訓練權重託管於 HuggingFace [`NeoQuasar/`](https://huggingface.co/NeoQuasar);本專案 fine-tuned 權重在 [`j835111/kronos-tw-finetune`](https://huggingface.co/j835111/kronos-tw-finetune)。
 
-The `predict` method requires three main inputs:
--   `df`: A pandas DataFrame containing the historical K-line data. It must include columns `['open', 'high', 'low', 'close']`. `volume` and `amount` are optional.
--   `x_timestamp`: A pandas Series of timestamps corresponding to the historical data in `df`.
--   `y_timestamp`: A pandas Series of timestamps for the future periods you want to predict.
+## License
 
-```python
-import pandas as pd
+沿用上游 [MIT License](LICENSE)。
 
-# Load your data
-df = pd.read_csv("./data/XSHG_5min_600977.csv")
-df['timestamps'] = pd.to_datetime(df['timestamps'])
+## ⚠️ 免責聲明
 
-# Define context window and prediction length
-lookback = 400
-pred_len = 120
-
-# Prepare inputs for the predictor
-x_df = df.loc[:lookback-1, ['open', 'high', 'low', 'close', 'volume', 'amount']]
-x_timestamp = df.loc[:lookback-1, 'timestamps']
-y_timestamp = df.loc[lookback:lookback+pred_len-1, 'timestamps']
-```
-
-#### 4. Generate Forecasts 
-
-Call the `predict` method to generate forecasts. You can control the sampling process with parameters like `T`, `top_p`, and `sample_count` for probabilistic forecasting.
-
-```python
-# Generate predictions
-pred_df = predictor.predict(
-    df=x_df,
-    x_timestamp=x_timestamp,
-    y_timestamp=y_timestamp,
-    pred_len=pred_len,
-    T=1.0,          # Temperature for sampling
-    top_p=0.9,      # Nucleus sampling probability
-    sample_count=1  # Number of forecast paths to generate and average
-)
-
-print("Forecasted Data Head:")
-print(pred_df.head())
-```
-
-The `predict` method returns a pandas DataFrame containing the forecasted values for `open`, `high`, `low`, `close`, `volume`, and `amount`, indexed by the `y_timestamp` you provided.
-
-For efficient processing of multiple time series, Kronos provides a `predict_batch` method that enables parallel prediction on multiple datasets simultaneously. This is particularly useful when you need to forecast multiple assets or time periods at once.
-
-```python
-# Prepare multiple datasets for batch prediction
-df_list = [df1, df2, df3]  # List of DataFrames
-x_timestamp_list = [x_ts1, x_ts2, x_ts3]  # List of historical timestamps
-y_timestamp_list = [y_ts1, y_ts2, y_ts3]  # List of future timestamps
-
-# Generate batch predictions
-pred_df_list = predictor.predict_batch(
-    df_list=df_list,
-    x_timestamp_list=x_timestamp_list,
-    y_timestamp_list=y_timestamp_list,
-    pred_len=pred_len,
-    T=1.0,
-    top_p=0.9,
-    sample_count=1,
-    verbose=True
-)
-
-# pred_df_list contains prediction results in the same order as input
-for i, pred_df in enumerate(pred_df_list):
-    print(f"Predictions for series {i}:")
-    print(pred_df.head())
-```
-
-**Important Requirements for Batch Prediction:**
-- All series must have the same historical length (lookback window)
-- All series must have the same prediction length (`pred_len`)
-- Each DataFrame must contain the required columns: `['open', 'high', 'low', 'close']`
-- `volume` and `amount` columns are optional and will be filled with zeros if missing
-
-The `predict_batch` method leverages GPU parallelism for efficient processing and automatically handles normalization and denormalization for each series independently.
-
-#### 5. Example and Visualization
-
-For a complete, runnable script that includes data loading, prediction, and plotting, please see [`examples/prediction_example.py`](examples/prediction_example.py).
-
-Running this script will generate a plot comparing the ground truth data against the model's forecast, similar to the one shown below:
-
-<p align="center">
-    <img src="figures/prediction_example.png" alt="Forecast Example" align="center" width="600px" />
-</p>
-
-Additionally, we provide a script that makes predictions without Volume and Amount data, which can be found in [`examples/prediction_wo_vol_example.py`](examples/prediction_wo_vol_example.py).
-
-
-## 🔧 Finetuning on Your Own Data (A-Share Market Example)
-
-We provide a complete pipeline for finetuning Kronos on your own datasets. As an example, we demonstrate how to use [Qlib](https://github.com/microsoft/qlib) to prepare data from the Chinese A-share market and conduct a simple backtest.
-
-> **Disclaimer:** This pipeline is intended as a demonstration to illustrate the finetuning process. It is a simplified example and not a production-ready quantitative trading system. A robust quantitative strategy requires more sophisticated techniques, such as portfolio optimization and risk factor neutralization, to achieve stable alpha.
-
-The finetuning process is divided into four main steps:
-
-1.  **Configuration**: Set up paths and hyperparameters.
-2.  **Data Preparation**: Process and split your data using Qlib.
-3.  **Model Finetuning**: Finetune the Tokenizer and the Predictor models.
-4.  **Backtesting**: Evaluate the finetuned model's performance.
-
-### Prerequisites
-
-1.  First, ensure you have all dependencies from `requirements.txt` installed.
-2.  This pipeline relies on `qlib`. Please install it:
-    ```shell
-      pip install pyqlib
-    ```
-3.  You will need to prepare your Qlib data. Follow the [official Qlib guide](https://github.com/microsoft/qlib) to download and set up your data locally. The example scripts assume you are using daily frequency data.
-
-### Step 1: Configure Your Experiment
-
-All settings for data, training, and model paths are centralized in `finetune/config.py`. Before running any scripts, please **modify the following paths** according to your environment:
-
-*   `qlib_data_path`: Path to your local Qlib data directory.
-*   `dataset_path`: Directory where the processed train/validation/test pickle files will be saved.
-*   `save_path`: Base directory for saving model checkpoints.
-*   `backtest_result_path`: Directory for saving backtesting results.
-*   `pretrained_tokenizer_path` and `pretrained_predictor_path`: Paths to the pre-trained models you want to start from (can be local paths or Hugging Face model names).
-
-You can also adjust other parameters like `instrument`, `train_time_range`, `epochs`, and `batch_size` to fit your specific task. If you don't use [Comet.ml](https://www.comet.com/), set `use_comet = False`.
-
-### Step 2: Prepare the Dataset
-
-Run the data preprocessing script. This script will load raw market data from your Qlib directory, process it, split it into training, validation, and test sets, and save them as pickle files.
-
-```shell
-python finetune/qlib_data_preprocess.py
-```
-
-After running, you will find `train_data.pkl`, `val_data.pkl`, and `test_data.pkl` in the directory specified by `dataset_path` in your config.
-
-### Step 3: Run the Finetuning
-
-The finetuning process consists of two stages: finetuning the tokenizer and then the predictor. Both training scripts are designed for multi-GPU training using `torchrun`.
-
-#### 3.1 Finetune the Tokenizer
-
-This step adjusts the tokenizer to the data distribution of your specific domain.
-
-```shell
-# Replace NUM_GPUS with the number of GPUs you want to use (e.g., 2)
-torchrun --standalone --nproc_per_node=NUM_GPUS finetune/train_tokenizer.py
-```
-
-The best tokenizer checkpoint will be saved to the path configured in `config.py` (derived from `save_path` and `tokenizer_save_folder_name`).
-
-#### 3.2 Finetune the Predictor
-
-This step finetunes the main Kronos model for the forecasting task.
-
-```shell
-# Replace NUM_GPUS with the number of GPUs you want to use (e.g., 2)
-torchrun --standalone --nproc_per_node=NUM_GPUS finetune/train_predictor.py
-```
-
-The best predictor checkpoint will be saved to the path configured in `config.py`.
-
-### Step 4: Evaluate with Backtesting
-
-Finally, run the backtesting script to evaluate your finetuned model. This script loads the models, performs inference on the test set, generates prediction signals (e.g., forecasted price change), and runs a simple top-K strategy backtest.
-
-```shell
-# Specify the GPU for inference
-python finetune/qlib_test.py --device cuda:0
-```
-
-The script will output a detailed performance analysis in your console and generate a plot showing the cumulative return curves of your strategy against the benchmark, similar to the one below:
-
-<p align="center">
-    <img src="figures/backtest_result_example.png" alt="Backtest Example" align="center" width="700px" />
-</p>
-
-### 💡 From Demo to Production: Important Considerations
-
-*   **Raw Signals vs. Pure Alpha**: The signals generated by the model in this demo are raw predictions. In a real-world quantitative workflow, these signals would typically be fed into a portfolio optimization model. This model would apply constraints to neutralize exposure to common risk factors (e.g., market beta, style factors like size and value), thereby isolating the **"pure alpha"** and improving the strategy's robustness.
-*   **Data Handling**: The provided `QlibDataset` is an example. For different data sources or formats, you will need to adapt the data loading and preprocessing logic.
-*   **Strategy and Backtesting Complexity**: The simple top-K strategy used here is a basic starting point. Production-level strategies often incorporate more complex logic for portfolio construction, dynamic position sizing, and risk management (e.g., stop-loss/take-profit rules). Furthermore, a high-fidelity backtest should meticulously model transaction costs, slippage, and market impact to provide a more accurate estimate of real-world performance.
-
-> **📝 AI-Generated Comments**: Please note that many of the code comments within the `finetune/` directory were generated by an AI assistant (Gemini 2.5 Pro) for explanatory purposes. While they aim to be helpful, they may contain inaccuracies. We recommend treating the code itself as the definitive source of logic.
-
-## 📖 Citation
-
-If you use Kronos in your research, we would appreciate a citation to our [paper](https://arxiv.org/abs/2508.02739):
-
-```
-@misc{shi2025kronos,
-      title={Kronos: A Foundation Model for the Language of Financial Markets}, 
-      author={Yu Shi and Zongliang Fu and Shuo Chen and Bohan Zhao and Wei Xu and Changshui Zhang and Jian Li},
-      year={2025},
-      eprint={2508.02739},
-      archivePrefix={arXiv},
-      primaryClass={q-fin.ST},
-      url={https://arxiv.org/abs/2508.02739}, 
-}
-```
-
-## 📜 License 
-This project is licensed under the [MIT License](./LICENSE).
-
-
-
-
-
-
-
-
-
-
+本專案僅供研究用途,所有回測結果與選股信號不構成投資建議。

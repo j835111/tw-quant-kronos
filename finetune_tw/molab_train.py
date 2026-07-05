@@ -27,7 +27,7 @@ def _imports():
 
 @app.cell
 def _setup(mo, os, sys, subprocess, tarfile, Path):
-    REPO_URL = "https://github.com/j835111/Kronos.git"
+    REPO_URL = "https://github.com/j835111/tw-quant-kronos.git"
     REPO_DIR = str(Path.home() / "Kronos")
     FTW_TAR  = str(Path.home() / "finetune_tw.tar.gz")
 

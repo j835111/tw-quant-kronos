@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$SCRIPT_DIR"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 CONFIG_PATH="finetune_tw/configs/config_tw_daily.yaml"
 TMP_PATH="$REPO_ROOT/.tmp"
 MPLCONFIG_PATH="$REPO_ROOT/.cache/matplotlib"

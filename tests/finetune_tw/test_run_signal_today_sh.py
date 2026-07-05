@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_PATH = REPO_ROOT / "run_signal_today.sh"
+SCRIPT_PATH = REPO_ROOT / "scripts" / "run_signal_today.sh"
 
 
 def test_run_signal_today_script_updates_db_then_runs_signal(tmp_path):

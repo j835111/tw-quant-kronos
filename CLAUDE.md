@@ -4,9 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Kronos is a decoder-only foundation model for financial K-line (candlestick) sequences, pre-trained on data from 45+ global exchanges. It uses a two-stage architecture: a specialized tokenizer quantizes OHLCV data into discrete tokens, then an autoregressive Transformer performs forecasting.
+**tw-quant-kronos** 是台股量化研究專案(fork 自 `shiyu-coder/Kronos`,已改名),主軸是 `finetune_tw/` 台股日線 fine-tune、回測與每日選股信號 pipeline。上游 Kronos 模型程式碼(`model/`)以 vendored library 形式保留。
 
-Published at AAAI 2026. Models are hosted on HuggingFace under `NeoQuasar/`.
+底層模型 Kronos 是 decoder-only 的金融 K 線基礎模型(AAAI 2026),兩階段架構:tokenizer 將 OHLCV 量化為離散 token,再由自回歸 Transformer 預測。預訓練權重在 HuggingFace `NeoQuasar/`;本專案 fine-tuned 權重在 `j835111/kronos-tw-finetune`。
+
+每日信號腳本:`scripts/run_signal_today_ensemble.sh`(production,靜態 Z-Score ensemble w=0.6)、`scripts/run_signal_today.sh`(Round 0 單模型)。
 
 ## Branch Strategy
 
@@ -101,12 +103,12 @@ python -m finetune_tw.grid_search_backtest --config $CONFIG --model round0 \
 2. 執行所有 cell（Run All）
 
 **持久化儲存：`/marimo/Kronos/`**（repo 根目錄，sandbox 重啟後資料保留）
-- `/marimo/Kronos/finetune_tw/data/tw_stocks.db` — 股價 DB，**已 commit 進 git**，`git pull fork master` 後直接可用，無需重新下載
+- `/marimo/Kronos/finetune_tw/data/tw_stocks.db` — 股價 DB。**不在 git 內**（被 `.gitignore` 排除），MoLab 持久碟上已有一份可直接沿用；全新環境需執行 `download_data` 重建
 - `/marimo/Kronos/finetune_tw/outputs/` — tokenizer & predictor checkpoint，重啟後自動 resume
 
 **MoLab 同步流程（sandbox 重啟後）：**
 ```bash
-# 1. Pull 最新程式碼與 DB（fork remote = j835111/Kronos）
+# 1. Pull 最新程式碼（fork remote = j835111/tw-quant-kronos，舊 URL 會自動 redirect）
 git -C /marimo/Kronos pull fork master
 
 # 2. 需要 HF 登入（下載 predictor checkpoint）
@@ -114,13 +116,13 @@ huggingface-cli login   # 或設定 HF_TOKEN 環境變數
 ```
 
 > **注意**：VM filesystem（`/home/marimo/`、`/tmp/` 等）每次 sandbox 重啟會清空。`/mnt/first/` 換 PV 時也會清空，不可靠。資料一律放在 `/marimo/Kronos/` 下。
-> **DB 已在 git**：`finetune_tw/data/tw_stocks.db`（274 支股票，2015-01-05 → 最新），不需要執行 `download_data`。
+> **DB 不在 git**：`finetune_tw/data/tw_stocks.db`（274 支股票，2015-01-05 → 最新）被 `.gitignore` 排除；MoLab 持久碟已有一份，只有全新環境才需要 `download_data`。
 
 ### Finetune (Taiwan stocks / Colab)
 使用 `finetune_tw/colab_setup.ipynb`，按 cell 順序執行：
 
 1. **掛載 Google Drive** — 資料與 checkpoint 持久化至 `MyDrive/Kronos_TW/`
-2. **Clone repo** — `https://github.com/shiyu-coder/Kronos`，並將 `finetune_tw/data` 與 `finetune_tw/outputs` symlink 至 Drive
+2. **Clone repo** — `https://github.com/j835111/tw-quant-kronos`，並將 `finetune_tw/data` 與 `finetune_tw/outputs` symlink 至 Drive
 3. **安裝依賴** — `requirements.txt` + `yfinance pyyaml tqdm`
 4. **下載台股資料** — `python -m finetune_tw.download_data --source auto --start 2015-01-01`
 5. **訓練 tokenizer** — `python -m finetune_tw.train_tokenizer --config finetune_tw/configs/config_tw_daily_t4.yaml`

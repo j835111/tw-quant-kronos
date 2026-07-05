@@ -17,7 +17,7 @@ Usage:
 import os, sys, subprocess, dataclasses, tarfile
 from pathlib import Path
 
-REPO_URL  = "https://github.com/j835111/Kronos.git"
+REPO_URL  = "https://github.com/j835111/tw-quant-kronos.git"
 REPO_DIR  = "/content/Kronos"
 DB_UPLOAD = "/content/tw_stocks.db"          # pre-uploaded (optional)
 DB_DST    = "/content/Kronos/finetune_tw/data/tw_stocks.db"
