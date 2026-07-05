@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -31,6 +32,30 @@ from finetune_tw.backtest_xgb_embedding import _load_model_feature_columns, _ass
 
 _PRICE_COLUMNS = ["open", "high", "low", "close", "volume", "amount"]
 BATCH_SIZE = 64
+
+# Production XGBoost checkpoints are backed up on this HF branch; missing local
+# files (fresh clone — finetune_tw/outputs/ is gitignored) are restored from here.
+HF_XGB_REPO = "j835111/kronos-tw-finetune"
+HF_XGB_REVISION = "round6-batch3c-full-production"
+HF_XGB_DIR = "round6_xgb/production"
+
+def _ensure_xgb_model(model_path: str) -> None:
+    """Download the XGBoost model and its .summary.json sidecar from HF if missing locally."""
+    from huggingface_hub import hf_hub_download
+
+    target = Path(model_path)
+    sidecar = target.with_suffix(".summary.json")
+    for dst in (target, sidecar):
+        if dst.exists():
+            continue
+        print(f"  {dst.name} not found locally; downloading from {HF_XGB_REPO}@{HF_XGB_REVISION} ...")
+        cached = hf_hub_download(
+            HF_XGB_REPO,
+            f"{HF_XGB_DIR}/{dst.name}",
+            revision=HF_XGB_REVISION,
+        )
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(cached, dst)
 
 def zscore(s):
     std = s.std()
@@ -181,6 +206,10 @@ def main() -> None:
     print(f"  Signal Date: {rebal_date.date()}")
     print(f"  CUDA Available: {torch.cuda.is_available()}")
     print()
+
+    # Restore XGB checkpoints from HF when the local files are missing
+    _ensure_xgb_model(args.xgb_model_full)
+    _ensure_xgb_model(args.xgb_model_raw)
 
     # Load feature metadata from sidecars
     feat_cols_full = _load_model_feature_columns(args.xgb_model_full)

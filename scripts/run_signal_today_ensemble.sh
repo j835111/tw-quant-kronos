@@ -55,7 +55,9 @@ echo "==> Updating database..."
   --update
 
 echo "==> Running daily signal generation with Ensemble Blending..."
-# Default models from Round 6 Batch 3c
+# Default models from Round 6 Batch 3c.
+# If these files are missing (fresh clone — outputs/ is gitignored), signal_today_ensemble.py
+# auto-downloads them from HF j835111/kronos-tw-finetune@round6-batch3c-full-production.
 XGB_FULL="finetune_tw/outputs/tw_daily/round6_artifacts/batch3c_results/xgb_batch3c_full.json"
 XGB_RAW="finetune_tw/outputs/tw_daily/round6_artifacts/batch3c_results/xgb_batch3c_raw.json"
 
