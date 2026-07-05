@@ -121,6 +121,11 @@ def get_ensemble_signals_for_date(
     cfg: Config,
     rebal_date: pd.Timestamp,
     symbols: list[str],
+    xreg_enabled: bool = False,
+    xreg_mult: float = 2.0,
+    xreg_lookback: int = 60,
+    xreg_purging_gap: int = 5,
+    hold_days: int = 5,
 ) -> dict[str, float]:
     """Execute ensemble inference for a single date."""
     contexts = _load_signal_contexts(cfg, rebal_date, symbols)
@@ -174,6 +179,23 @@ def get_ensemble_signals_for_date(
         for sym, pred in zip(ordered_syms, preds_blended):
             signals[sym] = float(pred)
 
+        # Apply XReg adjustment if enabled
+        if xreg_enabled:
+            from finetune_tw.trading_calendar import twse_trading_days
+            from finetune_tw.xreg import apply_xreg_adjustment
+            trading_days = sorted(list(twse_trading_days(cfg.db_path)))
+            signals = apply_xreg_adjustment(
+                db_path=cfg.db_path,
+                symbols=ordered_syms,
+                rebal_date_str=rebal_date.strftime("%Y-%m-%d"),
+                scores_gbdt=signals,
+                trading_days=trading_days,
+                lookback=xreg_lookback,
+                purging_gap=xreg_purging_gap,
+                hold_days=hold_days,
+                mult=xreg_mult,
+            )
+
     return signals
 
 def main() -> None:
@@ -186,6 +208,11 @@ def main() -> None:
     parser.add_argument("--date", default=None, help="Specify trading day (YYYY-MM-DD), default is latest in DB")
     parser.add_argument("--top_k", type=int, default=None, help="Number of holdings (default is config.top_k)")
     parser.add_argument("--holdings", default="", help="Currently held stock symbols, comma separated (for rebalance recommendations)")
+    parser.add_argument("--xreg_enabled", action="store_true", help="Enable Exogenous Residual Regression (XReg) adjustment")
+    parser.add_argument("--xreg_mult", type=float, default=2.0, help="Multiplier for XReg score adjustments")
+    parser.add_argument("--xreg_lookback", type=int, default=60, help="Lookback window in trading days for fitting Ridge")
+    parser.add_argument("--xreg_purging_gap", type=int, default=5, help="Purging gap in days to avoid look-ahead leak")
+    parser.add_argument("--xreg_alpha", type=float, default=1.0, help="Ridge regression L2 regularization alpha")
     args = parser.parse_args()
 
     cfg = Config.from_yaml(args.config)
@@ -205,6 +232,8 @@ def main() -> None:
     print(f"  Weight w  : {args.weight:.2f} (Full) / {1.0 - args.weight:.2f} (Raw)")
     print(f"  Signal Date: {rebal_date.date()}")
     print(f"  CUDA Available: {torch.cuda.is_available()}")
+    if args.xreg_enabled:
+        print(f"  XReg Enabled: mult={args.xreg_mult}, lookback={args.xreg_lookback}, purging_gap={args.xreg_purging_gap}")
     print()
 
     # Restore XGB checkpoints from HF when the local files are missing
@@ -245,6 +274,11 @@ def main() -> None:
         cfg=cfg,
         rebal_date=rebal_date,
         symbols=all_symbols,
+        xreg_enabled=args.xreg_enabled,
+        xreg_mult=args.xreg_mult,
+        xreg_lookback=args.xreg_lookback,
+        xreg_purging_gap=args.xreg_purging_gap,
+        hold_days=cfg.hold_days,
     )
 
     if not signals:

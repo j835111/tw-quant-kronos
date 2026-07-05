@@ -67,4 +67,6 @@ XGB_RAW="finetune_tw/outputs/tw_daily/round6_artifacts/batch3c_results/xgb_batch
   --xgb_model_raw "$XGB_RAW" \
   --weight 0.6 \
   --top_k 10 \
+  --xreg_enabled \
+  --xreg_mult 2.0 \
   "$@"

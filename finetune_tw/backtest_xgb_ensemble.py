@@ -43,10 +43,22 @@ def compute_xgb_ensemble_signals(
     feat_cols_full: list[str],
     feat_cols_raw: list[str],
     weight: float,
+    xreg_enabled: bool = False,
+    xreg_mult: float = 2.0,
+    xreg_lookback: int = 60,
+    xreg_purging_gap: int = 5,
+    hold_days: int = 5,
 ) -> dict[str, dict[str, float]]:
     preload_start = (rebal_dates.min() - pd.Timedelta(days=cfg.lookback_window * 2)).strftime("%Y-%m-%d")
     preload_end = rebal_dates.max().strftime("%Y-%m-%d")
     history_frames = load_symbol_history_frames(cfg.db_path, symbols, start=preload_start, end=preload_end)
+
+    # Initialize XReg helper variables if enabled
+    trading_days = None
+    if xreg_enabled:
+        from finetune_tw.trading_calendar import twse_trading_days
+        from finetune_tw.xreg import apply_xreg_adjustment
+        trading_days = sorted(list(twse_trading_days(cfg.db_path)))
 
     signals: dict[str, dict[str, float]] = {}
     for i, rebal_date in enumerate(rebal_dates):
@@ -97,6 +109,20 @@ def compute_xgb_ensemble_signals(
             
             for sym, pred in zip(ordered_syms, preds_blended):
                 date_scores[sym] = float(pred)
+                
+            # Apply XReg adjustment if enabled
+            if xreg_enabled and trading_days is not None:
+                date_scores = apply_xreg_adjustment(
+                    db_path=cfg.db_path,
+                    symbols=ordered_syms,
+                    rebal_date_str=rebal_date.strftime("%Y-%m-%d"),
+                    scores_gbdt=date_scores,
+                    trading_days=trading_days,
+                    lookback=xreg_lookback,
+                    purging_gap=xreg_purging_gap,
+                    hold_days=hold_days,
+                    mult=xreg_mult,
+                )
 
         signals[rebal_date.strftime("%Y-%m-%d")] = date_scores
         if (i + 1) % 5 == 0 or i == 0:
@@ -113,7 +139,12 @@ def run_backtest_xgb_ensemble(
     xgb_model_raw_path: str,
     weight: float,
     hold_days_list: list[int],
-    top_k: int
+    top_k: int,
+    xreg_enabled: bool = False,
+    xreg_mult: float = 2.0,
+    xreg_lookback: int = 60,
+    xreg_purging_gap: int = 5,
+    xreg_alpha: float = 1.0,
 ) -> Path:
     feat_cols_full = _load_model_feature_columns(xgb_model_full_path)
     feat_cols_raw = _load_model_feature_columns(xgb_model_raw_path)
@@ -146,28 +177,33 @@ def run_backtest_xgb_ensemble(
 
     price_frames = _load_price_frames(cfg, symbols, test_end)
     
-    print(f"Computing ensemble signals with weight w={weight:.2f} (full) ...")
-    xgb_preds_by_date = compute_xgb_ensemble_signals(
-        predictor=predictor,
-        booster_full=booster_full,
-        booster_raw=booster_raw,
-        cfg=cfg,
-        rebal_dates=signal_dates,
-        symbols=symbols,
-        feat_cols_full=feat_cols_full,
-        feat_cols_raw=feat_cols_raw,
-        weight=weight,
-    )
-    
-    del predictor
-    torch.cuda.empty_cache()
-
     out_dir = Path(cfg.output_dir) / cfg.exp_name
     out_dir.mkdir(parents=True, exist_ok=True)
     hold_variants: dict[str, dict] = {}
     
     for hd in hold_days_list:
+        print(f"Computing ensemble signals for hold={hd}d with weight w={weight:.2f} (full)...")
+        if xreg_enabled:
+            print(f"  XReg enabled: mult={xreg_mult}, lookback={xreg_lookback}, purging_gap={xreg_purging_gap}")
+        
         variant_signal_dates, variant_execution_dates = variant_schedules[hd]
+        xgb_preds_by_date = compute_xgb_ensemble_signals(
+            predictor=predictor,
+            booster_full=booster_full,
+            booster_raw=booster_raw,
+            cfg=cfg,
+            rebal_dates=pd.DatetimeIndex(variant_signal_dates),
+            symbols=symbols,
+            feat_cols_full=feat_cols_full,
+            feat_cols_raw=feat_cols_raw,
+            weight=weight,
+            xreg_enabled=xreg_enabled,
+            xreg_mult=xreg_mult,
+            xreg_lookback=xreg_lookback,
+            xreg_purging_gap=xreg_purging_gap,
+            hold_days=hd,
+        )
+        
         raw_preds = xgb_signals_to_raw_preds(xgb_preds_by_date, hd)
         holdings = signals_to_holdings(raw_preds, variant_signal_dates, hd, top_k, cfg.min_signal_threshold)
         _, daily_returns = build_next_open_portfolio_returns(
@@ -182,6 +218,9 @@ def run_backtest_xgb_ensemble(
         }
         print(f"  top_k={top_k} hold={hd}d — Ann:{metrics['annualised_return']:.2%} "
               f"Sharpe:{metrics['sharpe']:.2f} DD:{metrics['max_drawdown']:.2%}")
+              
+    del predictor
+    torch.cuda.empty_cache()
 
     out_path = out_dir / "backtest_returns_xgb_ensemble_next_open.json"
     out_path.write_text(json.dumps({
@@ -190,6 +229,10 @@ def run_backtest_xgb_ensemble(
         "xgb_model_raw": xgb_model_raw_path,
         "weight_full": weight,
         "top_k": top_k,
+        "xreg_enabled": xreg_enabled,
+        "xreg_mult": xreg_mult,
+        "xreg_lookback": xreg_lookback,
+        "xreg_purging_gap": xreg_purging_gap,
         "hold_variants": hold_variants
     }, indent=2))
     print(f"\nSaved -> {out_path}")
@@ -205,6 +248,11 @@ def main() -> None:
     parser.add_argument("--weight", type=float, default=0.6, help="Weight for full model (w * z_full + (1-w) * z_raw)")
     parser.add_argument("--hold_days_list", type=int, nargs="+", default=[5])
     parser.add_argument("--top_k", type=int, default=10)
+    parser.add_argument("--xreg_enabled", action="store_true", help="Enable Exogenous Residual Regression (XReg) adjustment")
+    parser.add_argument("--xreg_mult", type=float, default=2.0, help="Multiplier for XReg score adjustments")
+    parser.add_argument("--xreg_lookback", type=int, default=60, help="Lookback window in trading days for fitting Ridge")
+    parser.add_argument("--xreg_purging_gap", type=int, default=5, help="Purging gap in days to avoid look-ahead leak")
+    parser.add_argument("--xreg_alpha", type=float, default=1.0, help="Ridge regression L2 regularization alpha")
     args = parser.parse_args()
 
     cfg = Config.from_yaml(args.config)
@@ -216,6 +264,11 @@ def main() -> None:
         weight=args.weight,
         hold_days_list=args.hold_days_list,
         top_k=args.top_k,
+        xreg_enabled=args.xreg_enabled,
+        xreg_mult=args.xreg_mult,
+        xreg_lookback=args.xreg_lookback,
+        xreg_purging_gap=args.xreg_purging_gap,
+        xreg_alpha=args.xreg_alpha,
     )
 
 
