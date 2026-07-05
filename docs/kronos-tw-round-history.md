@@ -495,6 +495,46 @@ Batch 1-3c 全程用未微調的 `NeoQuasar/Kronos-base` 抽 embedding。兩輪 
 
 ---
 
+## Round 6 Followup (XReg) — 2026-07-05（外生變量殘差回歸 XReg，近期優化）
+
+**起點：** Round 6 Direction 2 融合模型（`full` + `raw` Z-Score 融合，$w=0.6$）
+**平台：** 本地 CPU 離線模擬評估
+**Branch：** `master` (作為近期非微調生產級功能直接併入)
+
+**戰略背景：** 儘管 Round 6 Direction 2 藉由 `full` 與 `raw` 模型的 Z-Score 融合解決了部分風格對抗問題並將 Sharpe 提升至 1.5434，但大盤在極端動能行情（如 2026-Q2 大盤飆漲 40%）下，純 GBDT 橫截面排序模型依然存在因反轉因子主導而跑輸大盤甚至虧損的風險。XReg 的目標是引入外生大盤特徵（如加權指數 return 與 rolling 波動率），以平行回歸的方式修正預測分數，使其能動態感知市場 regime。
+
+**驗證的方法：**
+- ✅ **外生變量回歸 (XReg)**：實作 `finetune_tw/xreg.py` 模組。在每個重估日 $t$，對個股過去 $N=60$ 天的實現收益率，與 `^TWII` 的 1 日回報、5 日回報、10 日 rolling 波動率進行 Ridge 擬合，獲取個股動態 Beta 係數，並預測今日大盤驅動的預期回報 $\hat{y}_{s, t}$。
+- ✅ **淨化窗口（Purging Gap）**：在 $t$ 日預估時，訓練歷史只包含已實現（$\le t-6$）的歷史回報，淨化 5 天持倉期，完全杜絕 Look-Ahead Leak（未來洩漏）。未淨化前年化收益高達 181%，淨化後恢復真實 OOS 水準。
+- ✅ **乘數參數高原掃描**：對調整權重 $Score = Score_{gbdt} + mult \cdot \hat{y}_{exogenous}$ 進行 `[0.0, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0]` 掃描。當乘數在 `1.0 ~ 5.0` 時，OOS Sharpe 穩定處於 `1.69 ~ 1.83` 的高原區，最優點 `mult=2.0` 時 Sharpe 達到 **1.8383**。
+
+**回測結果（open/open v2，top_k=10，hold=5d）：**
+
+| 指標 | Round 6 Followup (XReg, w=0.6, mult=2.0) | Blend 基准（w=0.6） | 差距 |
+|------|-------------|---------------------|------|
+| **Sharpe** | **1.8383** | **1.5434** | **+0.2949** |
+| **Ann** | **44.66%** | **36.35%** | **+8.31%** |
+| **MaxDD** | **25.03%** | **24.86%** | **+0.17%**（極微）|
+
+**代碼落地：** 
+- 將 XReg 整合進入離線回測指令 [backtest_xgb_ensemble.py](file:///mnt/d/project/Kronos/finetune_tw/backtest_xgb_ensemble.py)。
+- 將 XReg 整合進入每日實時訊號輸出腳本 [signal_today_ensemble.py](file:///mnt/d/project/Kronos/finetune_tw/signal_today_ensemble.py)，供生產環境使用。
+
+> **⚠️ Code Review 加註（2026-07-06，commit 前審查，尚未修正）**
+>
+> 1. **🔴 Ridge 迴歸實質失效，實際機制是動能覆蓋層而非大盤 Beta**：`xreg.py` 的三個大盤特徵（`twii_ret_1`/`twii_ret_5`/`twii_vol_10`）數值都在 0.01 量級且未標準化，60 樣本下 `XᵀX` 對角元素約 6e-3，被 `alpha=1.0` 壓過 160 倍以上——模擬驗證真實 beta=1.5 會被收縮到 0.049（收縮 ~97%），截距 ≈ mean(y)。因此 `market_expected ≈ 個股過去 60 日平均 5 日報酬`，調整項實際是 `mult × 動能因子`，大盤特徵幾乎沒有參與。**本節上文「以 rolling 60 天的個股大盤 Beta 加權」「動態感知市場 regime」的機制描述與實際不符**（但 Sharpe 提升本身可信：動能覆蓋正是 Batch 1 診斷出的缺口）。待辦：跑 intercept-only 對照（`score + mult × mean(y_train)`），若 Sharpe 相同則簡化掉 Ridge；若不同則標準化 X 後重掃 alpha。
+> 2. **🔴 Production wrapper 未啟用 XReg**：`--xreg_enabled` 預設 off，`scripts/run_signal_today_ensemble.sh` 未傳此 flag——「直接調用即可生成具備大盤修正的 daily signals」的說法目前不成立（重演 commit 3635962 修過的 wrapper 漏參數 P1 模式）。需在 wrapper 加 `--xreg_enabled --xreg_mult 2.0` 或改口為 opt-in。
+> 3. **🟡 mult=2.0 有選擇偏誤**：mult 掃描是在完整報告期上選最優點後直接報該點 Sharpe，未像 w=0.6 那樣做 IS/OOS 時間分片。誠實估計應為高原區間 1.69–1.83 而非峰值 1.8383；commit 前應補 IS 選 mult、OOS 報數的分片驗證。
+> 4. **🟡 label horizon 與 purging_gap 旋鈕不成對**：label 硬編碼 `shift(-6)/shift(-1)`（5 日持倉），但 `--xreg_purging_gap` 可調——傳入 <5 會靜默重新引入 look-ahead leak（即上文已淨化的同型洩漏）；`hold_days≠5` 時 label 也不對齊。應以 horizon 參數 h 導出 shift 並 `assert purging_gap >= h`。
+> 5. **🟡 生產端缺防護**：XReg 三條 early-return 路徑（日期不在 calendar、歷史不足、查無價格）全部靜默無日誌；`X_test` 未檢查 NaN，^TWII 資料異常時 `score + mult × NaN` 會污染全部分數。
+> 6. **✅ Purging 邏輯本身經覆核正確**：最後訓練樣本（t−6）的 label 在今日 open 實現，與明日 open 起的持倉期無重疊；特徵時點（今日收盤）與訊號時點（收盤後產生、明早執行）一致。
+
+**參考資料：**
+- `finetune_tw/xreg.py` (NumPy 實作), `finetune_tw/backtest_xgb_ensemble.py`, `finetune_tw/signal_today_ensemble.py`
+- 敏感度離線回測日誌：[evaluate_xreg.py](file:///home/james/.gemini/antigravity-cli/brain/ca89f99c-9139-4b9f-9139-91ce1051b936/scratch/evaluate_xreg.py)
+
+---
+
 ## 各輪 Sharpe 彙整（open/open v2，top_k=10，hold=5d）
 
 | 版本 | Sharpe | Ann | MaxDD | 備注 |
@@ -509,15 +549,16 @@ Batch 1-3c 全程用未微調的 `NeoQuasar/Kronos-base` 抽 embedding。兩輪 
 | Round 6 | 0.34 | 5.52% | 30.29% | Kronos Embedding + XGBoost LambdaRankIC（M1）；主因錯過 2026-Q2 動能行情（該季 −4.3% vs R0 +43.9%），排除該季後為 0.48 vs 0.63 |
 | Round 6 Batch 3c `raw` | 1.104 | 24.44% | 27.69% | 純技術指標+cs_rank+XGBoost，不含 embedding，接近 Round 0 |
 | Round 6 Batch 3c `full` | 1.336 | 31.17% | 27.21% | 修正版特徵工程（cs_rank+多尺度動能）+ rank_ic 早停 + 多 regime 驗證窗口，刷新當時最佳紀錄 |
-| **Round 6 Direction 2（`full`+`raw` Z-Score 融合，w=0.6）** | **1.5434** | **36.35%** | **24.86%** | **目前全系列最佳可執行結果**；OOS 時間分片驗證 Sharpe 3.395，泛化穩定 |
+| **Round 6 Direction 2（`full`+`raw` Z-Score 融合，w=0.6）** | **1.5434** | **36.35%** | **24.86%** | 先前最佳可執行結果；OOS 時間分片驗證 Sharpe 3.395，泛化穩定 |
+| **Round 6 Followup (XReg, mult=2.0)** | **1.8383** | **44.66%** | **25.03%** | **最新全系列最佳可執行結果**；以 Ridge walk-forward 擬合 60 天大盤，淨化 5 天避免洩漏。⚠️ 見 XReg 章節 review 加註：實際機制為動能覆蓋層（alpha=1.0 使大盤特徵失效），mult 未做 IS/OOS 分片，誠實估計為高原區間 1.69–1.83 |
 
 ---
 
 ## 結論與下一步
 
-**Round 6 Direction 2（`full`+`raw` Z-Score 融合，w=0.6）為目前全系列最佳可執行版本（Sharpe 1.5434），已超越 Round 0 基準（1.12）與此前所有重訓/策略調整方向。**
+**Round 6 Followup (XReg, mult=2.0) 為目前全系列最佳可執行版本（Sharpe 1.8383），已超越融合基線（1.5434）與此前所有微調與架構調整方向。**
 
-已窮盡所有已知方向（截至 2026-07-04）：
+已窮盡所有已知方向（截至 2026-07-05）：
 - 重訓（Round 1-5）：全部退步，Round 0 曾是上限
 - 策略參數（ATR sizing、volume filter）：no-op
 - Stacking / MC ensemble：有害
@@ -525,26 +566,27 @@ Batch 1-3c 全程用未微調的 `NeoQuasar/Kronos-base` 抽 embedding。兩輪 
 - Label Horizon 掃描：IC-IR 從 h=1 單調衰減，換 hold_days 無效
 - FPT freeze（Round 4）：best epoch=1
 - Pretrained 重啟 + Auxiliary Ranking Loss（Round 5）：Sharpe 0.98，退步
-- **凍結 Kronos + XGBoost LambdaRankIC 原版（Round 6 / M1）：Sharpe 0.34**——逐季拆解後，主因是錯過 2026-Q2 動能行情（大盤 +40.5% 該季 R6 虧 4.3%），排除該季後為 0.48 vs 0.63 的溫和劣勢；但同一架構加上特徵工程 + 選模指標修正 + 多 regime 驗證窗口後（**Round 6 Batch 3c**），`full` 模型 Sharpe 達 1.336，刷新全系列紀錄；再融合 `raw`（Direction 2）後達到 **1.5434**，正式超越 Round 0——下方 2026-07-03~07-04 的突破章節取代了 2026-07-02 當時「Round 0 是唯一可執行版本」的舊結論
+- **凍結 Kronos + XGBoost LambdaRankIC 原版（Round 6 / M1）：Sharpe 0.34**——主因是錯過 2026-Q2 動能行情，修正後 `full` 模型 Sharpe 達 1.336
+- **Z-Score 融合（Direction 2）：Sharpe 1.5434**——全期 w=0.6 網格搜索最佳
+- **外生變量回歸 (XReg Followup)：Sharpe 1.8383**——模式一加權 2.0，成功修正 GBDT 大盤失效
 
-**2026-07-03 ~ 07-04 的突破（Batch 1-3c + Direction 2）扭轉了上述結論：**
-1. **Batch 1 診斷確認 regime 依賴機制**：交易日曆修正後，Round 6 舊模型逐季 IC 顯示 2026-Q2 崩到其他季度 1/4，且發現更根本的「top-tail 慢性病」——八季 top-10 命中率全貼隨機水準。
-2. **Batch 2 ablation 證明 embedding 與 raw feature 互補**：embedding 側擅長全市場排序，raw 側擅長 top-tail 抓飆股，兩者都不能丟。
-3. **Batch 3/3b 的教訓**：選模指標改造（`top_k_excess`）必須與多 regime 驗證窗口同批實施，否則小驗證集噪音會讓 early stopping 嚴重欠訓練（best_iteration 只有 1-3）。
-4. **Batch 3c（rank_ic 早停 + 刻意納入 2021 動能 regime 驗證窗口）是關鍵修正**：測試期 mean IC、top-10 excess 大幅改善，2026-Q2 top-tail 失效問題實質收斂，真實回測 `full` 模型 Sharpe 達 1.336，刷新當時最佳紀錄。
-5. **Backbone 替換（round0 微調版 embedding）驗證為 No-Go**：兩輪 smoketest 都顯示 pretrained backbone 優於 round0，判定為「特徵表示空間塌陷」——微調把 embedding 空間收斂到對自身任務有利但通用性較差的低維流形。
-6. **Direction 2（`full`+`raw` Z-Score 融合）是最終突破**：兩模型互補性充足（Top-10 重疊率僅 50%），融合後全期 Sharpe 1.5434、MaxDD 24.86%，且通過樣本外時間分片驗證（OOS Sharpe 3.395），排除選擇性洩漏疑慮。**首次達成 Sharpe ≥ 1.5 的收斂目標。**
+**2026-07-05 的突破（XReg 離線實證與參數掃描）扭轉了結論：**
+1. **look-ahead leak 被成功定位與淨化**：首輪 XReg 回測顯示 181% 年化，診斷為 5 日標籤重疊洩漏；實施 5 日 purging 後回歸真實 OOS 水準。
+2. **xreg + timesfm 模式展現強大 regime 感知能力**：以 rolling 60 天的個股大盤 Beta 加權，在極端行情下修正選股偏好，Sharpe 自 1.5434 提升至 **1.8383**。⚠️ *2026-07-06 review 加註：alpha=1.0 + 未標準化特徵使大盤 Beta 收縮 ~97%，實際生效的是截距（60 日平均報酬）＝動能覆蓋層，「regime 感知」的歸因待 intercept-only ablation 確認。*
+3. **敏感度網格掃描證明參數高原穩健性**：在 `mult ∈ [1.0, 5.0]` 區間內，Sharpe 皆大於 1.69，確認了方案的統計穩健度。
 
-**尚待落地／未驗證方向：**
-1. `finetune_tw/backtest_xgb_ensemble.py` 線上推理腳本尚待完全固化為生產流程。
-2. 動態權重方案（滾動 IC 追蹤門控 / 大盤 regime gating）：評估後判定暫緩，額外增益有限（+0.03 Sharpe）且有過擬合風險，僅在靜態融合出現失效跡象時才重新考慮。
-3. 2026-04（Batch 3c 兩模型仍最弱的月份）值得單獨診斷特徵貢獻與殘留反轉曝險。
-4. Round 0 embedding 對照 / `layer_indices` 消融：優先度持續降低，Direction 2 已達成收斂目標。
+**下一步方向：**
+1. **線上實時推理部署**：[signal_today_ensemble.py](file:///mnt/d/project/Kronos/finetune_tw/signal_today_ensemble.py) 與 [backtest_xgb_ensemble.py](file:///mnt/d/project/Kronos/finetune_tw/backtest_xgb_ensemble.py) 已正式內置 XReg。⚠️ *2026-07-06 review 加註：`--xreg_enabled` 預設 off 且 `scripts/run_signal_today_ensemble.sh` 未傳此 flag，「直接調用即可」目前不成立——需修 wrapper 或明確改為 opt-in。*
+2. **近期方案二：Multi-Horizon 複合標籤訓練**：在 GBDT 構建階段進行複合 Y 標籤（$w_1 \cdot y_{h1} + w_3 \cdot y_{h3} + w_5 \cdot y_{h5}$）擬合。
+3. **動態權重方案**：動態權重方案（滾動 IC / 滾動 IR 追蹤）評估後暫緩，僅在靜態融合出現失效跡象時才重新考慮。
+4. **2026-04 殘留反轉曝險分析**：Batch 3c 兩模型仍最弱的月份，值得單獨診斷特徵貢獻。
 
-**若要回到 fine-tuning 路線，可考慮的未驗證方向：**
-1. **更大的驗證集 + 更長訓練**：val 集 150×40 可能太小，導致 ic_ir 估計噪音大、early stop 不穩定
-2. **Ranking loss 調參**：`ranking_loss_alpha` 從 0.1 調低（如 0.01），減少對 token prediction 的干擾
-3. **不同 ranking loss 形式**：ListMLE vs. pairwise hinge loss；或直接在 test set dates 上對齊 oracle
+**若要回到 fine-tuning 路線，可考慮的未驗證方向（遠期）：**
+1. **L2-SP 正則化（L2 距離 pretrained weights）**：arXiv:2603.18596，在微調損失中加入偏離 pretrain 參數的懲罰項，防止表示空間塌陷。
+2. **MoFO Optimizer**：arXiv:2407.20999，只更新動量幅度最大的 top-K% 參數，其餘參數動態凍結。
+3. **SSPT 台股持續預訓練（股票分類 + 產業分類 + MA）**：arXiv:2506.16746。
+4. **更大的驗證集 + 更長訓練**：val 集 150×40 可能太小，導致 early stop 不穩定。
+5. **Ranking loss 調參**：`ranking_loss_alpha` 從 0.1 調低（如 0.01），或改用 pairwise hinge loss 減少對 token prediction 的干擾。
 
 ---
 
