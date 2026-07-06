@@ -1,6 +1,6 @@
 """Round 6 Batch-1 diagnostics: TWSE-calendar filtering + test-period per-stock scores + per-period IC.
 
-Implements docs/round6-embedding-xgb-lambdarank-improvements.md 補充評估二 Batch 1:
+Implements docs/research/round6-embedding-xgb-lambdarank-improvements.md 補充評估二 Batch 1:
 score the cached test-period embeddings with xgb_round6.json on real TWSE trading days only,
 then break rank-IC / top-10 excess down by quarter and month to test the 2026-Q2
 reversal-exposure hypothesis.
@@ -268,7 +268,7 @@ def main() -> None:
     parser.add_argument("--out-dir", default=str(ARTIFACT_DIR))
     parser.add_argument("--best-iteration", type=int, default=None,
                         help="Defaults to the model's stored best_iteration; Round 6's is 190 "
-                             "(docs/round6_artifact_evaluation.md)")
+                             "(docs/research/round6-artifact-evaluation.md)")
     parser.add_argument("--features", choices=["full", "emb", "raw"], default="full",
                         help="Feature set the model was trained on (for ablation models)")
     parser.add_argument("--prefix", default="round6_test",

@@ -187,7 +187,7 @@ def compute_technical_features(df: pd.DataFrame) -> dict[str, float]:
 
 # 補充評估二（Claude，2026-07-03）——對照 Codex artifact evaluation 後的裁定與最終執行計畫
 
-> 本節為對照 `docs/round6_artifact_evaluation.md`（Codex 以快取產物做的實證評估）後的第二次增補，原文與補充評估一均未修改。
+> 本節為對照 `docs/research/round6-artifact-evaluation.md`（Codex 以快取產物做的實證評估）後的第二次增補，原文與補充評估一均未修改。
 
 ## 兩份文件的關係
 
