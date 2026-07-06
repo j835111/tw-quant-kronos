@@ -25,7 +25,7 @@ from finetune_tw.extract_embeddings import extract_embeddings_batch
 from finetune_tw.feature_engineering import add_cross_sectional_rank_features, compute_technical_features
 from finetune_tw.backtest_xgb_embedding import _load_model_feature_columns, _assemble_feature_matrix, xgb_signals_to_raw_preds
 
-BATCH_SIZE = 64
+BATCH_SIZE = 16
 
 def zscore(s):
     std = s.std()

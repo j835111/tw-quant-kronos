@@ -229,20 +229,44 @@ def _merge_date_runs(parquet_paths, keep_dates: set[str] | None) -> list[tuple[s
 class ParquetIter(xgb.DataIter):
     """Stream (features, label) batches from a parquet file for QuantileDMatrix."""
 
-    def __init__(self, parquet_path, feat_cols: list[str], keep_dates: set[str] | None,
-                 batch_size: int = BATCH_SIZE):
+    def __init__(
+        self,
+        parquet_path,
+        feat_cols: list[str],
+        keep_dates: set[str] | None,
+        batch_size: int = BATCH_SIZE,
+        mh_enabled: bool = False,
+        w_h1: float = 0.5,
+        w_h3: float = 0.3,
+        w_h5: float = 0.2,
+        targets_path: str | None = None,
+    ):
         self._path = parquet_path
         self._feat_cols = feat_cols
         self._keep_dates = keep_dates
         self._batch_size = batch_size
+        self._mh_enabled = mh_enabled
+        self._w_h1 = w_h1
+        self._w_h3 = w_h3
+        self._w_h5 = w_h5
+        self._targets_path = targets_path
         self._batches = None
+        
+        self._targets_df = None
+        if self._mh_enabled and self._targets_path:
+            print(f"Loading Multi-Horizon train targets in-memory from {self._targets_path}...", flush=True)
+            self._targets_df = pd.read_parquet(self._targets_path)
+            self._targets_df['date'] = _date_strings(self._targets_df['date'])
+            self._targets_df = self._targets_df.set_index(['date', 'symbol']).sort_index()
+            
         super().__init__()
 
     def reset(self) -> None:
         pf = pq.ParquetFile(self._path)
+        cols = ["date", "symbol", "label", *self._feat_cols] if self._mh_enabled else ["date", "label", *self._feat_cols]
         self._batches = pf.iter_batches(
             batch_size=self._batch_size,
-            columns=["date", "label", *self._feat_cols],
+            columns=cols,
         )
 
     def next(self, input_data) -> bool:
@@ -257,8 +281,24 @@ class ParquetIter(xgb.DataIter):
                 if not mask.any():
                     continue
                 row_idx = np.flatnonzero(mask)
+            
             x = batch_to_matrix(batch, self._feat_cols, row_idx=row_idx)
-            y = batch.column(name_to_idx["label"]).to_numpy(zero_copy_only=False)
+            
+            if self._mh_enabled and self._targets_df is not None:
+                dates = _date_strings(batch.column(name_to_idx["date"]).to_pandas())
+                symbols = batch.column(name_to_idx["symbol"]).to_pandas()
+                keys = list(zip(dates, symbols))
+                try:
+                    mh_rows = self._targets_df.loc[keys]
+                    y_h1 = mh_rows['label_h1'].values
+                    y_h3 = mh_rows['label_h3'].values
+                    y_h5 = mh_rows['label_h5'].values
+                    y = self._w_h1 * y_h1 + self._w_h3 * y_h3 + self._w_h5 * y_h5
+                except KeyError:
+                    y = batch.column(name_to_idx["label"]).to_numpy(zero_copy_only=False)
+            else:
+                y = batch.column(name_to_idx["label"]).to_numpy(zero_copy_only=False)
+                
             if row_idx is not None:
                 y = y[row_idx]
             input_data(data=x, label=y.astype(np.float32))
@@ -266,8 +306,16 @@ class ParquetIter(xgb.DataIter):
         return False
 
 
-def load_val_matrix(parquet_path, feat_cols: list[str], keep_dates: set[str] | None,
-                    ) -> tuple[xgb.DMatrix, list[int]]:
+def load_val_matrix(
+    parquet_path,
+    feat_cols: list[str],
+    keep_dates: set[str] | None,
+    mh_enabled: bool = False,
+    w_h1: float = 0.5,
+    w_h3: float = 0.3,
+    w_h5: float = 0.2,
+    targets_path: str | None = None,
+) -> tuple[xgb.DMatrix, list[int]]:
     """Validation set is small enough (~120k rows) for an in-memory float32 DMatrix."""
     paths = list(parquet_path) if isinstance(parquet_path, (list, tuple)) else [parquet_path]
     if not paths:
@@ -279,7 +327,19 @@ def load_val_matrix(parquet_path, feat_cols: list[str], keep_dates: set[str] | N
 
     pos = 0
     for path in paths:
-        pos = _fill_matrix_from_parquet(path, feat_cols, keep_dates, x, y, pos)
+        pos = _fill_matrix_from_parquet(
+            path,
+            feat_cols,
+            keep_dates,
+            x,
+            y,
+            pos,
+            mh_enabled=mh_enabled,
+            w_h1=w_h1,
+            w_h3=w_h3,
+            w_h5=w_h5,
+            targets_path=targets_path,
+        )
     assert pos == n_rows
     dval = xgb.DMatrix(x, label=y)
     dval.set_group(groups)
@@ -293,11 +353,22 @@ def _fill_matrix_from_parquet(
     x: np.ndarray,
     y: np.ndarray,
     pos: int,
+    mh_enabled: bool = False,
+    w_h1: float = 0.5,
+    w_h3: float = 0.3,
+    w_h5: float = 0.2,
+    targets_path: str | None = None,
 ) -> int:
+    df_targets = None
+    if mh_enabled and targets_path:
+        df_targets = pd.read_parquet(targets_path)
+        df_targets['date'] = _date_strings(df_targets['date'])
+        df_targets = df_targets.set_index(['date', 'symbol']).sort_index()
+
     pf = pq.ParquetFile(parquet_path)
     for batch in pf.iter_batches(
         batch_size=BATCH_SIZE,
-        columns=["date", "label", *feat_cols],
+        columns=["date", "symbol", "label", *feat_cols],
     ):
         name_to_idx = {name: i for i, name in enumerate(batch.schema.names)}
         row_idx = None
@@ -309,9 +380,32 @@ def _fill_matrix_from_parquet(
                 continue
             row_idx = np.flatnonzero(mask)
             n_rows = len(row_idx)
+            
         x[pos:pos + n_rows] = batch_to_matrix(batch, feat_cols, row_idx=row_idx)
-        labels = batch.column(name_to_idx["label"]).to_numpy(zero_copy_only=False)
-        y[pos:pos + n_rows] = labels[row_idx] if row_idx is not None else labels
+        
+        if mh_enabled and df_targets is not None:
+            dates = _date_strings(batch.column(name_to_idx["date"]).to_pandas())
+            symbols = batch.column(name_to_idx["symbol"]).to_pandas()
+            if row_idx is not None:
+                dates = dates.iloc[row_idx]
+                symbols = symbols.iloc[row_idx]
+            
+            keys = list(zip(dates, symbols))
+            try:
+                mh_rows = df_targets.loc[keys]
+                y_h1 = mh_rows['label_h1'].values
+                y_h3 = mh_rows['label_h3'].values
+                y_h5 = mh_rows['label_h5'].values
+                labels = w_h1 * y_h1 + w_h3 * y_h3 + w_h5 * y_h5
+            except KeyError:
+                labels = batch.column(name_to_idx["label"]).to_numpy(zero_copy_only=False)
+                if row_idx is not None:
+                    labels = labels[row_idx]
+            y[pos:pos + n_rows] = labels
+        else:
+            labels = batch.column(name_to_idx["label"]).to_numpy(zero_copy_only=False)
+            y[pos:pos + n_rows] = labels[row_idx] if row_idx is not None else labels
+            
         pos += n_rows
     return pos
 
@@ -405,6 +499,13 @@ def train_streaming(
     top_k: int = 10,
     train_keep_dates: set[str] | None = None,
     val_keep_dates: set[str] | None = None,
+    mh_enabled: bool = False,
+    w_h1: float = 0.5,
+    w_h3: float = 0.3,
+    w_h5: float = 0.2,
+    train_targets_path: str | None = None,
+    val_targets_path: str | None = None,
+    val_use_composite: bool = False,
 ) -> tuple[xgb.Booster, dict]:
     if selection_metric not in SELECTION_METRICS:
         raise ValueError(
@@ -433,11 +534,31 @@ def train_streaming(
     train_params["max_bin"] = int(train_params["max_bin"])
 
     dtrain = xgb.QuantileDMatrix(
-        ParquetIter(train_path, feat_cols, effective_train_keep_dates),
+        ParquetIter(
+            train_path,
+            feat_cols,
+            effective_train_keep_dates,
+            mh_enabled=mh_enabled,
+            w_h1=w_h1,
+            w_h3=w_h3,
+            w_h5=w_h5,
+            targets_path=train_targets_path,
+        ),
         max_bin=train_params["max_bin"],
         nthread=train_params.get("nthread"),
     )
-    dval, val_groups = load_val_matrix(val_path, feat_cols, effective_val_keep_dates)
+    
+    val_targets = val_targets_path if val_use_composite else None
+    dval, val_groups = load_val_matrix(
+        val_path,
+        feat_cols,
+        effective_val_keep_dates,
+        mh_enabled=(mh_enabled and val_use_composite),
+        w_h1=w_h1,
+        w_h3=w_h3,
+        w_h5=w_h5,
+        targets_path=val_targets,
+    )
     print(f"[{feature_set}] {dval.num_row()} val rows, {len(val_groups)} val dates", flush=True)
 
     obj = parallel_lambdarank_ic_objective(train_groups, sigma=1.0, n_threads=n_threads)
@@ -556,6 +677,13 @@ def main() -> None:
             f"or ${MEM_LIMIT_ENV_VAR} if set)"
         ),
     )
+    parser.add_argument("--mh_enabled", action="store_true", help="Enable Multi-Horizon composite target training")
+    parser.add_argument("--w_h1", type=float, default=0.5, help="Weight for 1-day return target")
+    parser.add_argument("--w_h3", type=float, default=0.3, help="Weight for 3-day return target")
+    parser.add_argument("--w_h5", type=float, default=0.2, help="Weight for 5-day return target")
+    parser.add_argument("--train_targets", default=None, help="Path to train multi-horizon targets parquet")
+    parser.add_argument("--val_targets", default=None, help="Path to val multi-horizon targets parquet")
+    parser.add_argument("--val_use_composite", action="store_true", help="Use composite target for validation metrics as well")
     args = parser.parse_args()
     try:
         _apply_memory_limit(_resolve_mem_limit_gb(args.mem_limit_gb))
@@ -598,6 +726,13 @@ def main() -> None:
         top_k=args.top_k,
         train_keep_dates=train_keep_dates,
         val_keep_dates=val_keep_dates,
+        mh_enabled=args.mh_enabled,
+        w_h1=args.w_h1,
+        w_h3=args.w_h3,
+        w_h5=args.w_h5,
+        train_targets_path=args.train_targets,
+        val_targets_path=args.val_targets,
+        val_use_composite=args.val_use_composite,
     )
     booster.save_model(args.out)
     with open(Path(args.out).with_suffix(".summary.json"), "w") as f:

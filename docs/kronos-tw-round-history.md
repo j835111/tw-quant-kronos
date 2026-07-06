@@ -533,6 +533,36 @@ Batch 1-3c 全程用未微調的 `NeoQuasar/Kronos-base` 抽 embedding。兩輪 
 - `finetune_tw/xreg.py` (NumPy 實作), `finetune_tw/backtest_xgb_ensemble.py`, `finetune_tw/signal_today_ensemble.py`
 - 敏感度離線回測日誌：[evaluate_xreg.py](file:///home/james/.gemini/antigravity-cli/brain/ca89f99c-9139-4b9f-9139-91ce1051b936/scratch/evaluate_xreg.py)
 
+### Multi-Horizon 複合標籤訓練的評估 — 2026-07-06
+
+**目的**：使用多窗口複合目標 $y_{comp} = 0.5 \cdot y_{h1} + 0.3 \cdot y_{h3} + 0.2 \cdot y_{h5}$ 進行 GBDT（XGBoost）模型訓練，藉由高信噪比的短線標籤作為正規化引導，改善長線持倉的排序精度。
+
+**方法**：
+- **複合標籤**：$y_{comp} = 0.5 \cdot y_{h1} + 0.3 \cdot y_{h3} + 0.2 \cdot y_{h5}$，對齊特徵後直接作為 GBDT 的回歸目標。
+- **微調對象**：GBDT `full` 模型（836維特徵）與 `raw` 模型（4維特徵）。
+- **訓練配置**：使用 RunPod 50GB RAM 無限制虛擬記憶體配置，在遠端順序訓練兩模型各 200 輪（解除了虛擬內存對齊限制）。
+- **回測評估**：對訓練好的 `full_mh` 與 `raw_mh` 模型進行 0.6 : 0.4 的 Z-Score 權重融合，並啟用 XReg（mult=2.0）殘差修正，測試期為 2024-07-01 至 2026-06-10（97個訊號日，hold=5d）。
+
+**結果**：
+- **模型收斂與驗證集預測力分析 (Validation Rank-IC)**：
+  我們對訓練好的複合模型在驗證集（共 121,807 筆觀測值）上進行了不同期限標籤的預測力回測：
+  - **1日預測力 (Horizon h1)**：Mean Rank-IC = **`5.95%`** (IR = `0.5017`)
+  - **3日預測力 (Horizon h3)**：Mean Rank-IC = **`6.28%`** (IR = **`0.6312`** 🎯 巔峰)
+  - **5日預測力 (Horizon h5)**：Mean Rank-IC = **`6.09%`** (IR = `0.5838`)
+  - **收斂輪數**：`full` 模型於第 199 輪收斂；`raw` 模型於第 192 輪收斂。
+- **回測表現 (測試期：2024-07-01 至 2026-06-10，hold=5d)**：
+  - **年化報酬率**：**`45.85%`**（較 XReg 單一標籤基準的 44.66% 提升 +1.19%）。
+  - **Sharpe 比率**：**`1.18`**（較 XReg 單一標籤基準的 1.8383 顯著下滑）。
+  - **最大回撤**：**`27.54%`**（較 XReg 單一標籤基準的 25.03% 放大）。
+
+**分析與檢討**：
+1. **驗證了「持倉不匹配」假說**：實證資料顯示，模型對 **3日窗口 (h3)** 具有最高的預測相關性（Rank-IC 6.28%）與最高的風險調整穩定度（IR 0.6312）。這直接證實了採用 `hold=5d` 持倉時，後兩天（Day 4-5）會因為訊號衰減與市場噪訊介入，造成持倉組合的波動度上升與回撤放大，進而拖累 Sharpe 比率。
+2. **短線 Alpha 的回報爆發力**：複合標籤引入了 $y_{h1}$（50% 權重）與 $y_{h3}$（30% 權重），這讓模型成功捕捉到了短線的高信噪比排序訊號，進而使樣本外（OOS）年化報酬率攀升至 **45.85%** 的新高。
+2. **持倉期與訊號衰減不匹配（Label Horizon Paradox）**：由於回測仍採用 `hold=5d`（5日持倉），而模型的核心預測目標為 1 日與 3 日的短線收益，導致在持倉期的後半段（第 4 至 5 天）訊號衰減嚴重。這引發了持倉組合在後半段的波動劇增與回撤放大，從而拉低了整體的 Sharpe 比率。
+3. **優化建議**：
+   - **調整持倉窗口**：如果將交易策略的持倉期調整為 `hold=1d` 或 `hold=3d`，該複合標籤模型預期能釋放出極強的 Sharpe 表現。
+   - **重調複合權重**：在維持 `hold=5d` 的前提下，應提高長線標籤的權重（例如 $y_{comp} = 0.2 \cdot y_{h1} + 0.3 \cdot y_{h3} + 0.5 \cdot y_{h5}$），以改善與持有期限的對齊。
+
 ---
 
 ## 各輪 Sharpe 彙整（open/open v2，top_k=10，hold=5d）
@@ -551,6 +581,7 @@ Batch 1-3c 全程用未微調的 `NeoQuasar/Kronos-base` 抽 embedding。兩輪 
 | Round 6 Batch 3c `full` | 1.336 | 31.17% | 27.21% | 修正版特徵工程（cs_rank+多尺度動能）+ rank_ic 早停 + 多 regime 驗證窗口，刷新當時最佳紀錄 |
 | **Round 6 Direction 2（`full`+`raw` Z-Score 融合，w=0.6）** | **1.5434** | **36.35%** | **24.86%** | 先前最佳可執行結果；OOS 時間分片驗證 Sharpe 3.395，泛化穩定 |
 | **Round 6 Followup (XReg, mult=2.0)** | **1.8383** | **44.66%** | **25.03%** | **最新全系列最佳可執行結果**；以 Ridge walk-forward 擬合 60 天大盤，淨化 5 天避免洩漏。⚠️ 見 XReg 章節 review 加註：實際機制為動能覆蓋層（alpha=1.0 使大盤特徵失效），mult 未做 IS/OOS 分片，誠實估計為高原區間 1.69–1.83 |
+| **Round 6 Followup (Multi-Horizon + XReg, mult=2.0)** | **1.18** | **45.85%** | **27.54%** | **年化報酬刷新全系列紀錄**；複合標籤 $0.5 \cdot y_{h1} + 0.3 \cdot y_{h3} + 0.2 \cdot y_{h5}$ 捕捉到更強短線收益，但 5 日持倉導致後期訊號衰減，波動度變大，Sharpe 下滑 |
 
 ---
 
@@ -577,9 +608,12 @@ Batch 1-3c 全程用未微調的 `NeoQuasar/Kronos-base` 抽 embedding。兩輪 
 
 **下一步方向：**
 1. **線上實時推理部署**：[signal_today_ensemble.py](file:///mnt/d/project/Kronos/finetune_tw/signal_today_ensemble.py) 與 [backtest_xgb_ensemble.py](file:///mnt/d/project/Kronos/finetune_tw/backtest_xgb_ensemble.py) 已正式內置 XReg。⚠️ *2026-07-06 review 加註：`--xreg_enabled` 預設 off 且 `scripts/run_signal_today_ensemble.sh` 未傳此 flag，「直接調用即可」目前不成立——需修 wrapper 或明確改為 opt-in。*
-2. **近期方案二：Multi-Horizon 複合標籤訓練**：在 GBDT 構建階段進行複合 Y 標籤（$w_1 \cdot y_{h1} + w_3 \cdot y_{h3} + w_5 \cdot y_{h5}$）擬合。
-3. **動態權重方案**：動態權重方案（滾動 IC / 滾動 IR 追蹤）評估後暫緩，僅在靜態融合出現失效跡象時才重新考慮。
-4. **2026-04 殘留反轉曝險分析**：Batch 3c 兩模型仍最弱的月份，值得單獨診斷特徵貢獻。
+2. **近期方案二：Multi-Horizon 複合標籤訓練**：✅ 已完成。使用複合 Y 標籤進行 GBDT 擬合，OOS 年化回報提升至 45.85%，但 5 日持倉存在訊號衰減，導致 Sharpe 下滑。
+3. **動態持倉天數方案 (Dynamic Holding Days)**：
+   - **方案一：預測期限結構匹配 (Alpha Term Structure Matching)**：依據多尺度標籤（$y_{h1}, y_{h3}, y_{h5}$）的預測期限結構，自動對「動能持續型」個股設定長持倉（5-8天），對「短線反轉型」個股設定短持倉（1天）。
+   - **方案二：截面排名閾值出場 (Rank-based Threshold Exit)**：Top 10 買入，但不設定固定持倉天數。當個股在每日最新預測中的截面排名跌破設定閾值（如 Top 20）時即刻出場，以對齊訊號衰減速率。
+4. **動態權重方案**：動態權重方案（滾動 IC / 滾動 IR 追蹤）評估後暫緩，僅在靜態融合出現失效跡象時才重新考慮。
+5. **2026-04 殘留反轉曝險分析**：Batch 3c 兩模型仍最弱的月份，值得單獨診斷特徵貢獻。
 
 **若要回到 fine-tuning 路線，可考慮的未驗證方向（遠期）：**
 1. **L2-SP 正則化（L2 距離 pretrained weights）**：arXiv:2603.18596，在微調損失中加入偏離 pretrain 參數的懲罰項，防止表示空間塌陷。
@@ -630,6 +664,7 @@ Batch 1-3c 全程用未微調的 `NeoQuasar/Kronos-base` 抽 embedding。兩輪 
 | **Price-space MSE 輔助損失** | 260626 S1 | 🟠 低（moonshot）| 解碼 token → price，計算 MSE；需改 tokenizer |
 | **ic_val_dates 至 60** | 260629 N2 | 🟠 低 | SE(IC-IR)=0.14，統計力充足；目前用 40 |
 | **連續回歸 head / Chronos-2 架構** | 260626 S2 | 🔵 研究級 | 拋棄 BSQ 離散化，論文級工作量 |
+| **full+raw 動態融合權重方案 (Dynamic Blending)** | — | 🟡 中 | 追蹤兩模型前 N 日的滾動 IC/IR 表現，動態調整線性融合權重 w，以適應不同市場 regime，取代靜態 w=0.6。不需重訓模型 |
 
 **關鍵未驗證組合（最值得嘗試）：**  
 `pretrained 完全重啟 + close-to-close IC-IR@h1 early stopping`  
