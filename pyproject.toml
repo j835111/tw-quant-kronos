@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "finetune_tw"
@@ -16,7 +16,7 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["finetune_tw*", "model*"]
+include = ["model*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
