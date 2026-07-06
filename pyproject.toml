@@ -5,10 +5,18 @@ build-backend = "setuptools.backends.legacy:build"
 [project]
 name = "finetune_tw"
 version = "0.1.0"
+dependencies = [
+    "numpy",
+    "pandas",
+    "torch>=2.0.0",
+    "huggingface_hub",
+    "tqdm",
+    "einops",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["finetune_tw*"]
+include = ["finetune_tw*", "model*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
